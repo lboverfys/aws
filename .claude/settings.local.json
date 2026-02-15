@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__mcpServers__search_context",
+      "Bash(python3:*)",
+      "Bash(python:*)",
+      "Bash(node --check:*)",
+      "Bash(echo:*)",
+      "Bash(node -c:*)"
+    ]
+  }
+}
