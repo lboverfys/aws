@@ -310,15 +310,7 @@ async function runSessionRegistration(session) {
 
     console.log(`[Session ${session.id}] 账号信息:`, { email: session.email, firstName, lastName });
 
-    // 步骤 3: 获取 OIDC 授权 URL（使用 API 锁）
-    updateSession(session.id, { step: '获取授权链接...' });
-    session.oidcClient = new AWSDeviceAuth();
-    const authInfo = await withApiLock(() => session.oidcClient.quickAuth());
-    session.oidcAuth = authInfo;
-
-    console.log(`[Session ${session.id}] OIDC 授权信息:`, authInfo.verificationUriComplete);
-
-    // 步骤 4: 设置代理（如果配置了）
+    // 步骤 3: 设置代理（必须在 OIDC 调用之前，确保 API 请求也走代理）
     let currentProxy = null;
     if (proxyConfigData.mode !== 'none') {
       updateSession(session.id, { step: '设置代理...' });
@@ -344,6 +336,8 @@ async function runSessionRegistration(session) {
 
         if (currentProxy) {
           await proxyManager.applyProxy(currentProxy);
+          // 等待代理生效
+          await new Promise(resolve => setTimeout(resolve, 300));
           console.log(`[Session ${session.id}] 代理已设置: ${currentProxy.host}:${currentProxy.port}`);
         }
       } catch (e) {
@@ -352,7 +346,15 @@ async function runSessionRegistration(session) {
       }
     }
 
-    // 步骤 5: 生成指纹配置（在打开窗口前，结合代理 IP 地理位置）
+    // 步骤 4: 获取 OIDC 授权 URL（代理已生效，API 请求走代理 IP）
+    updateSession(session.id, { step: '获取授权链接...' });
+    session.oidcClient = new AWSDeviceAuth();
+    const authInfo = await withApiLock(() => session.oidcClient.quickAuth());
+    session.oidcAuth = authInfo;
+
+    console.log(`[Session ${session.id}] OIDC 授权信息:`, authInfo.verificationUriComplete);
+
+    // 步骤 5: 生成指纹配置（结合代理 IP 地理位置）
     let geoInfo = null;
     if (currentProxy) {
       updateSession(session.id, { step: '查询 IP 地理位置...' });
