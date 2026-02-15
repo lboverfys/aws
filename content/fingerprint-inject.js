@@ -230,6 +230,28 @@ export function applyFingerprint(config) {
       }
 
       const origReadPixels = proto.readPixels;
+
+      // getShaderPrecisionFormat 伪装
+      if (webglCfg.shaderPrecisionFormat) {
+        const spfConfig = webglCfg.shaderPrecisionFormat;
+        const origGetSPF = proto.getShaderPrecisionFormat;
+        defMethod(proto, 'getShaderPrecisionFormat', function (shaderType, precisionType) {
+          const result = origGetSPF.call(this, shaderType, precisionType);
+          if (!result) return result;
+          // 判断是 FLOAT 类型还是 INT 类型
+          // HIGH_FLOAT=0x8DF2, MEDIUM_FLOAT=0x8DF1, LOW_FLOAT=0x8DF0
+          // HIGH_INT=0x8DF5, MEDIUM_INT=0x8DF4, LOW_INT=0x8DF3
+          const isFloat = precisionType >= 0x8DF0 && precisionType <= 0x8DF2;
+          const cfg = isFloat ? spfConfig.FLOAT : spfConfig.INT;
+          if (cfg) {
+            Object.defineProperty(result, 'rangeMin', { value: cfg.rangeMin, writable: false, configurable: true });
+            Object.defineProperty(result, 'rangeMax', { value: cfg.rangeMax, writable: false, configurable: true });
+            Object.defineProperty(result, 'precision', { value: cfg.precision, writable: false, configurable: true });
+          }
+          return result;
+        });
+      }
+
       defMethod(proto, 'readPixels', function (...args) {
         origReadPixels.apply(this, args);
         const pixels = args[6];
@@ -419,6 +441,51 @@ export function applyFingerprint(config) {
         if (!allowed.has(fontFamily.toLowerCase())) return false;
         return origCheck.call(this, font, text);
       });
+
+      // FontFaceSet 迭代方法 — 按 allowedFonts 过滤
+      const origForEach = FontFaceSet.prototype.forEach;
+      defMethod(FontFaceSet.prototype, 'forEach', function (callback, thisArg) {
+        origForEach.call(this, function (fontFace, fontFace2, set) {
+          if (allowed.has(fontFace.family.toLowerCase())) {
+            callback.call(thisArg, fontFace, fontFace2, set);
+          }
+        });
+      });
+
+      const origValues = FontFaceSet.prototype.values;
+      defMethod(FontFaceSet.prototype, 'values', function () {
+        const iter = origValues.call(this);
+        return {
+          next() {
+            while (true) {
+              const result = iter.next();
+              if (result.done) return result;
+              if (allowed.has(result.value.family.toLowerCase())) return result;
+            }
+          },
+          [Symbol.iterator]() { return this; }
+        };
+      });
+
+      defMethod(FontFaceSet.prototype, 'entries', function () {
+        const iter = origValues.call(this);
+        return {
+          next() {
+            while (true) {
+              const result = iter.next();
+              if (result.done) return result;
+              if (allowed.has(result.value.family.toLowerCase())) {
+                return { value: [result.value, result.value], done: false };
+              }
+            }
+          },
+          [Symbol.iterator]() { return this; }
+        };
+      });
+
+      // Symbol.iterator 指向 values
+      FontFaceSet.prototype[Symbol.iterator] = FontFaceSet.prototype.values;
+      markAsNative(FontFaceSet.prototype[Symbol.iterator]);
     }
   }
 
@@ -541,14 +608,72 @@ export function applyFingerprint(config) {
   }
 
   // ============== Plugins & MimeTypes ==============
+  // 返回真实 Chrome 内置 PDF 插件列表，避免空列表被检测
+  const pdfMimeType = {
+    type: 'application/pdf',
+    suffixes: 'pdf',
+    description: 'Portable Document Format',
+    enabledPlugin: null, // 后面回填
+  };
+  const pdfMimeType2 = {
+    type: 'application/x-google-chrome-pdf',
+    suffixes: 'pdf',
+    description: 'Portable Document Format',
+    enabledPlugin: null,
+  };
+
+  const pluginNames = [
+    'PDF Viewer',
+    'Chrome PDF Viewer',
+    'Chromium PDF Viewer',
+    'Microsoft Edge PDF Viewer',
+    'WebKit built-in PDF',
+  ];
+
+  const fakePlugins = pluginNames.map((name, idx) => {
+    const mt = { ...pdfMimeType, enabledPlugin: null };
+    const plugin = {
+      name,
+      description: 'Portable Document Format',
+      filename: 'internal-pdf-viewer',
+      length: 1,
+      0: mt,
+      item: (i) => i === 0 ? mt : null,
+      namedItem: (n) => n === 'application/pdf' ? mt : null,
+      [Symbol.iterator]: function* () { yield mt; },
+    };
+    mt.enabledPlugin = plugin;
+    return plugin;
+  });
+
   defProp(Navigator.prototype, 'plugins', () => {
-    const list = { length: 0, item: () => null, namedItem: () => null, refresh: () => {} };
-    list[Symbol.iterator] = function* () {};
+    const list = Object.create(PluginArray.prototype);
+    for (let i = 0; i < fakePlugins.length; i++) {
+      list[i] = fakePlugins[i];
+    }
+    Object.defineProperty(list, 'length', { value: fakePlugins.length, writable: false, enumerable: true, configurable: true });
+    list.item = (idx) => fakePlugins[idx] || null;
+    list.namedItem = (name) => fakePlugins.find(p => p.name === name) || null;
+    list.refresh = () => {};
+    list[Symbol.iterator] = function* () { for (const p of fakePlugins) yield p; };
+    markAsNative(list.item);
+    markAsNative(list.namedItem);
+    markAsNative(list.refresh);
     return list;
   });
+
+  const fakeMimeTypes = [pdfMimeType, pdfMimeType2];
   defProp(Navigator.prototype, 'mimeTypes', () => {
-    const list = { length: 0, item: () => null, namedItem: () => null };
-    list[Symbol.iterator] = function* () {};
+    const list = Object.create(MimeTypeArray.prototype);
+    for (let i = 0; i < fakeMimeTypes.length; i++) {
+      list[i] = fakeMimeTypes[i];
+    }
+    Object.defineProperty(list, 'length', { value: fakeMimeTypes.length, writable: false, enumerable: true, configurable: true });
+    list.item = (idx) => fakeMimeTypes[idx] || null;
+    list.namedItem = (name) => fakeMimeTypes.find(m => m.type === name) || null;
+    list[Symbol.iterator] = function* () { for (const m of fakeMimeTypes) yield m; };
+    markAsNative(list.item);
+    markAsNative(list.namedItem);
     return list;
   });
 
@@ -635,6 +760,53 @@ export function applyFingerprint(config) {
       return origQuery.call(this, desc);
     });
   }
+
+  // ============== Performance Entries 过滤 ==============
+  // 过滤掉包含 chrome-extension:// 的条目，防止扩展暴露
+  if (typeof Performance !== 'undefined') {
+    const extPattern = 'chrome-extension://';
+
+    const origGetEntries = Performance.prototype.getEntries;
+    defMethod(Performance.prototype, 'getEntries', function () {
+      return origGetEntries.call(this).filter(e => !e.name.includes(extPattern));
+    });
+
+    const origGetEntriesByType = Performance.prototype.getEntriesByType;
+    defMethod(Performance.prototype, 'getEntriesByType', function (type) {
+      return origGetEntriesByType.call(this, type).filter(e => !e.name.includes(extPattern));
+    });
+
+    const origGetEntriesByName = Performance.prototype.getEntriesByName;
+    defMethod(Performance.prototype, 'getEntriesByName', function (name, type) {
+      if (name.includes(extPattern)) return [];
+      return origGetEntriesByName.call(this, name, type).filter(e => !e.name.includes(extPattern));
+    });
+  }
+
+  // ============== Error.stack 清理 ==============
+  // 过滤掉包含 chrome-extension:// 的栈帧
+  const origPrepareStackTrace = Error.prepareStackTrace;
+  Error.prepareStackTrace = function (error, structuredStack) {
+    const filtered = structuredStack.filter(frame => {
+      const fileName = frame.getFileName();
+      return !fileName || !fileName.includes('chrome-extension://');
+    });
+    if (origPrepareStackTrace) {
+      return origPrepareStackTrace(error, filtered);
+    }
+    // 默认格式化
+    const lines = filtered.map(frame => `    at ${frame}`);
+    return `${error.name}: ${error.message}\n${lines.join('\n')}`;
+  };
+
+  // ============== DNS Prefetch 禁用 ==============
+  // 防止浏览器通过 DNS prefetch 泄露真实 DNS 请求
+  try {
+    const meta = document.createElement('meta');
+    meta.httpEquiv = 'x-dns-prefetch-control';
+    meta.content = 'off';
+    (document.head || document.documentElement).appendChild(meta);
+  } catch (_) {}
 
   // 注入完成（不输出日志，避免被页面检测）
 }

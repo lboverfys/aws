@@ -103,7 +103,8 @@
       </div>
     `;
     shadow.appendChild(toastContainer);
-    document.body.appendChild(toastHost);
+    toastHost.style.display = 'contents';
+    document.body.insertBefore(toastHost, document.body.firstChild);
 
     toastContent = {
       title: shadow.querySelector('.toast-title'),

@@ -373,12 +373,15 @@ async function runSessionRegistration(session) {
       console.log(`[Session ${session.id}] 准备创建无痕窗口，URL:`, authInfo.verificationUriComplete);
 
       // 先创建空白窗口，避免首次请求泄露真实 HTTP 头
+      const fpScreen = session.fingerprintConfig.screen;
+      const winWidth = Math.min(fpScreen.width - 200, 1366);
+      const winHeight = Math.min(fpScreen.height - 150, 900);
       const window = await chrome.windows.create({
         url: 'about:blank',
         incognito: true,
         focused: true,
-        width: 600,
-        height: 800
+        width: winWidth,
+        height: winHeight
       });
 
       // 检查窗口和标签页
@@ -1175,6 +1178,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
     chrome.tabs.get(details.tabId).then(tab => {
       const session = findSessionByWindowId(tab.windowId);
       if (!session?.fingerprintConfig) return;
+      // 注册到快速查找表，确保后续导航走同步路径
+      registerTabFingerprint(details.tabId, session.fingerprintConfig);
       chrome.scripting.executeScript({
         target: { tabId: details.tabId, frameIds: [details.frameId] },
         world: 'MAIN',
@@ -1227,6 +1232,9 @@ async function applyUAHeaderRules(tabId, fpConfig) {
         { header: 'sec-ch-ua-platform', operation: 'set', value: '"Windows"' },
         { header: 'sec-ch-ua-platform-version', operation: 'set', value: '"10.0.0"' },
         { header: 'sec-ch-ua-mobile', operation: 'set', value: '?0' },
+        { header: 'sec-ch-ua-arch', operation: 'set', value: '"x86"' },
+        { header: 'sec-ch-ua-bitness', operation: 'set', value: '"64"' },
+        { header: 'sec-ch-ua-model', operation: 'set', value: '""' },
         { header: 'Accept-Language', operation: 'set', value: acceptLang },
       ]
     },
