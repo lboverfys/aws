@@ -128,30 +128,6 @@
             <button id="reset-btn" class="btn btn-outline" style="display:none">重新开始</button>
           </div>
 
-          <!-- Token Pool -->
-          <div id="token-pool-section" class="section">
-            <div class="section-header">
-              <h2>Token Pool</h2>
-              <div class="section-actions">
-                <button id="pool-upload-btn" class="btn-small btn-small-primary" style="display:none" title="上传有效 Token 至 Pool">上传</button>
-              </div>
-            </div>
-            <div id="pool-config" class="pool-config">
-              <div class="pool-input-row">
-                <input type="text" id="pool-api-key" placeholder="输入 API Key" class="pool-input">
-                <button id="pool-connect-btn" class="btn-small">连接</button>
-              </div>
-              <p class="pool-hint">在 Token Pool 网站生成 API Key</p>
-            </div>
-            <div id="pool-user-info" class="pool-user-info" style="display:none">
-              <div class="pool-user-row">
-                <span class="pool-user-name" id="pool-username">-</span>
-                <span class="pool-user-points" id="pool-points">0 积分</span>
-                <button id="pool-disconnect-btn" class="btn-small btn-small-danger">断开</button>
-              </div>
-            </div>
-          </div>
-
         </div>
 
         <!-- 右栏：状态与结果 -->
@@ -359,23 +335,11 @@
   const proxyPoolList = $('#proxy-pool-list');
   const proxyPoolSaveBtn = $('#proxy-pool-save-btn');
   const proxyStatus = $('#proxy-status');
-  const poolApiKeyInput = $('#pool-api-key');
-  const poolConnectBtn = $('#pool-connect-btn');
-  const poolDisconnectBtn = $('#pool-disconnect-btn');
-  const poolUploadBtn = $('#pool-upload-btn');
-  const poolConfig = $('#pool-config');
-  const poolUserInfo = $('#pool-user-info');
-  const poolUsername = $('#pool-username');
-  const poolPoints = $('#pool-points');
-
   // ============== 状态变量 ==============
 
   let gmailAddress = '';
   let moemailConfig = { apiUrl: '', apiKey: '', domain: '' };
   let proxyConfig = { mode: 'none', address: '', apiUrl: '', pool: '' };
-  const POOL_API_URL = 'http://localhost:8080';
-  let poolApiKey = '';
-  let poolUser = null;
 
   // ============== UI 更新 ==============
 
@@ -468,7 +432,7 @@
       historyList.innerHTML = '<div class="history-empty">暂无记录</div>';
       return;
     }
-    historyList.innerHTML = history.slice(0, 20).map(item => {
+    historyList.innerHTML = history.slice(0, 50).map(item => {
       let statusClass = item.success ? 'success' : 'failed';
       if (item.success && item.tokenStatus) {
         const m = { valid:'success', suspended:'suspended', expired:'expired', invalid:'invalid', error:'error', unknown:'unknown' };
@@ -899,122 +863,6 @@
     } else { gmailStatus.textContent = ''; gmailStatus.classList.remove('error'); }
   }
 
-  // ============== Token Pool ==============
-
-  async function loadPoolConfig() {
-    try {
-      const result = await chrome.storage.local.get(['poolApiKey']);
-      if (result.poolApiKey) {
-        poolApiKey = result.poolApiKey;
-        poolApiKeyInput.value = poolApiKey;
-        await connectToPool();
-      }
-    } catch (error) { console.error('[Pool] 加载配置错误:', error); }
-  }
-
-  async function connectToPool() {
-    const apiKey = poolApiKeyInput.value.trim();
-    if (!apiKey) { await showAlert('请输入 API Key'); return; }
-
-    poolConnectBtn.disabled = true;
-    poolConnectBtn.textContent = '连接中...';
-
-    try {
-      const resp = await swFetch(`${POOL_API_URL}/api/cli/profile`, {
-        method: 'GET',
-        headers: { 'X-API-Key': apiKey }
-      });
-      if (!resp.ok) {
-        let errMsg = '连接失败';
-        try { const d = JSON.parse(resp.body); errMsg = d.error || errMsg; } catch {}
-        throw new Error(errMsg);
-      }
-      const user = JSON.parse(resp.body);
-      poolApiKey = apiKey;
-      poolUser = user;
-      await chrome.storage.local.set({ poolApiKey: apiKey });
-      updatePoolUI();
-    } catch (error) {
-      console.error('[Pool] 连接错误:', error);
-      await showAlert('连接失败: ' + error.message);
-    } finally {
-      poolConnectBtn.disabled = false;
-      poolConnectBtn.textContent = '连接';
-    }
-  }
-
-  async function disconnectFromPool() {
-    poolApiKey = '';
-    poolUser = null;
-    await chrome.storage.local.remove(['poolApiKey']);
-    poolApiKeyInput.value = '';
-    updatePoolUI();
-  }
-
-  function updatePoolUI() {
-    if (poolUser) {
-      poolConfig.style.display = 'none';
-      poolUserInfo.style.display = 'flex';
-      poolUsername.textContent = poolUser.username || poolUser.email;
-      poolPoints.textContent = `${poolUser.points} 积分`;
-      poolUploadBtn.style.display = 'inline-flex';
-    } else {
-      poolConfig.style.display = 'block';
-      poolUserInfo.style.display = 'none';
-      poolUploadBtn.style.display = 'none';
-    }
-  }
-
-  async function uploadToPool() {
-    if (!poolApiKey || !poolUser) { await showAlert('请先连接 Token Pool'); return; }
-
-    try {
-      const response = await chrome.runtime.sendMessage({ type: 'EXPORT_HISTORY' });
-      const history = response.history || [];
-      const validRecords = history.filter(r => r.success && r.token && r.tokenStatus === 'valid');
-      if (validRecords.length === 0) { await showAlert('没有可上传的有效 Token\n\n请先验证 Token 状态'); return; }
-
-      const ok = await showConfirm(`确定上传 ${validRecords.length} 个有效 Token 至 Pool？`);
-      if (!ok) return;
-
-      poolUploadBtn.disabled = true;
-      poolUploadBtn.textContent = '上传中...';
-
-      const tokens = validRecords.map(r => ({
-        email: r.email, clientId: r.token.clientId, clientSecret: r.token.clientSecret,
-        accessToken: r.token.accessToken, refreshToken: r.token.refreshToken
-      }));
-
-      const resp = await swFetch(`${POOL_API_URL}/api/cli/upload`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-Key': poolApiKey },
-        body: JSON.stringify({ tokens })
-      });
-
-      const result = JSON.parse(resp.body);
-      if (!resp.ok) throw new Error(result.error || '上传失败');
-
-      if (result.current_points !== undefined) {
-        poolUser.points = result.current_points;
-        poolPoints.textContent = `${poolUser.points} 积分`;
-      }
-
-      let message = '上传成功！\n\n';
-      if (result.new_count > 0) message += `新增: ${result.new_count}\n`;
-      if (result.update_count > 0) message += `更新: ${result.update_count}\n`;
-      if (result.skip_count > 0) message += `跳过: ${result.skip_count}\n`;
-      if (result.valid_count > 0) message += `有效: ${result.valid_count}\n`;
-      if (result.points_earned > 0) message += `\n获得 ${result.points_earned} 积分`;
-      await showAlert(message);
-    } catch (error) {
-      console.error('[Pool] 上传错误:', error);
-      await showAlert('上传失败: ' + error.message);
-    } finally {
-      poolUploadBtn.disabled = false;
-      poolUploadBtn.textContent = '上传';
-    }
-  }
-
   // ============== 面板显示/隐藏 ==============
 
   function showPanel() { backdrop.style.display = 'flex'; }
@@ -1061,7 +909,6 @@
     await loadGmailConfig();
     await loadMoemailConfig();
     await loadProxyConfig();
-    await loadPoolConfig();
 
     // 绑定按钮事件
     startBtn.addEventListener('click', startRegistration);
@@ -1091,10 +938,6 @@
     proxySaveBtn.addEventListener('click', saveProxyConfig);
     proxyFetchBtn.addEventListener('click', fetchProxiesFromApi);
     proxyPoolSaveBtn.addEventListener('click', saveProxyConfig);
-
-    poolConnectBtn.addEventListener('click', connectToPool);
-    poolDisconnectBtn.addEventListener('click', disconnectFromPool);
-    poolUploadBtn.addEventListener('click', uploadToPool);
 
     // 复制按钮
     shadow.querySelectorAll('.copy-btn').forEach(btn => {

@@ -459,9 +459,18 @@
       return PAGE_TYPES.NAME;
     }
 
-    // 密码页
+    // 密码页 — 只要有一个密码输入框即可识别，不再要求同时找到确认框
+    // 通过 URL 或页面上存在多个 password 输入框来判断
+    if (url.includes('password') || url.includes('setPassword') || url.includes('create-password')) {
+      return PAGE_TYPES.PASSWORD;
+    }
+    const allPwdInputs = document.querySelectorAll('input[type="password"]');
+    if (allPwdInputs.length >= 2) {
+      return PAGE_TYPES.PASSWORD;
+    }
+    // 单个密码框 + 有 "Re-enter" 或 "Confirm" 相关提示也算密码页
     const pwdInput = $('input[placeholder="Enter password"], input[name="password"], input[type="password"][autocomplete="new-password"]');
-    const confirmPwdInput = $('input[placeholder="Re-enter password"], input[name="confirmPassword"], input[type="password"][autocomplete="new-password"]:nth-of-type(2)');
+    const confirmPwdInput = $('input[placeholder="Re-enter password"], input[name="confirmPassword"]');
     if (pwdInput && confirmPwdInput) {
       return PAGE_TYPES.PASSWORD;
     }
@@ -598,8 +607,23 @@
       return false;
     }
 
-    const pwdInput = $('input[placeholder="Enter password"], input[name="password"], input[type="password"]:not([name="confirmPassword"])');
-    const confirmInput = $('input[placeholder="Re-enter password"], input[name="confirmPassword"]');
+    // 等待密码输入框出现（页面跳转后 DOM 可能还没渲染完）
+    let pwdInput = null;
+    let confirmInput = null;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      // 找所有 password 输入框
+      const allPwd = document.querySelectorAll('input[type="password"]');
+      if (allPwd.length >= 2) {
+        pwdInput = allPwd[0];
+        confirmInput = allPwd[1];
+        break;
+      }
+      // 也尝试具名选择器
+      pwdInput = $('input[placeholder="Enter password"], input[name="password"], input[type="password"]:not([name="confirmPassword"])');
+      confirmInput = $('input[placeholder="Re-enter password"], input[name="confirmPassword"]');
+      if (pwdInput) break;
+      await randomDelay(150, 300);
+    }
 
     if (!pwdInput) {
       return false;
