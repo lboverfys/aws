@@ -315,7 +315,7 @@ async function runSessionRegistration(session) {
     if (proxyConfigData.mode !== 'none') {
       updateSession(session.id, { step: '设置代理...' });
       try {
-        if (proxyConfigData.mode === 'manual') {
+        if (proxyConfigData.mode === 'manual' || proxyConfigData.mode === 'socks5') {
           currentProxy = proxyManager.parseProxy(proxyConfigData.address);
         } else if (proxyConfigData.mode === 'api') {
           // 从 API 提取代理列表（如果池为空）

@@ -81,7 +81,7 @@
 }
 
 .panel-col-left {
-  flex: 0 0 340px;
+  flex: 0 0 380px;
   border-right: 1px solid var(--border-light);
   background: var(--bg);
 }
@@ -762,6 +762,26 @@
   font-weight: 500;
 }
 .proxy-status.error { color: var(--danger); }
+
+/* SOCKS5 auth checkbox row */
+.socks5-auth-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.socks5-auth-row input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--success);
+}
 
 /* Mail / Proxy provider select */
 .mail-provider-select,

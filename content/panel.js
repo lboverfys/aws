@@ -84,6 +84,7 @@
               <select id="proxy-mode" class="provider-select">
                 <option value="none">不使用代理</option>
                 <option value="manual">手动配置</option>
+                <option value="socks5">SOCKS5</option>
                 <option value="api">API 提取</option>
                 <option value="pool">代理池</option>
               </select>
@@ -93,6 +94,23 @@
                 <input type="text" id="proxy-address" placeholder="host:port:user:pass" class="gmail-input">
                 <button id="proxy-save-btn" class="btn-small">保存</button>
               </div>
+            </div>
+            <div id="proxy-socks5-config" class="proxy-config-panel" style="display:none">
+              <div class="gmail-input-row">
+                <input type="text" id="socks5-host" placeholder="IP 地址" class="gmail-input" style="flex:2">
+                <input type="number" id="socks5-port" placeholder="端口" class="gmail-input" style="flex:1" min="1" max="65535">
+              </div>
+              <label class="socks5-auth-row">
+                <input type="checkbox" id="socks5-auth-check">
+                <span>需要身份验证</span>
+              </label>
+              <div id="socks5-auth-fields" style="display:none">
+                <div class="gmail-input-row">
+                  <input type="text" id="socks5-username" placeholder="用户名" class="gmail-input">
+                  <input type="password" id="socks5-password" placeholder="密码" class="gmail-input">
+                </div>
+              </div>
+              <button id="socks5-save-btn" class="btn-small" style="margin-top:6px">保存</button>
             </div>
             <div id="proxy-api-config" class="proxy-config-panel" style="display:none">
               <div class="gmail-input-row">
@@ -335,6 +353,14 @@
   const proxyPoolList = $('#proxy-pool-list');
   const proxyPoolSaveBtn = $('#proxy-pool-save-btn');
   const proxyStatus = $('#proxy-status');
+  const proxySocks5Config = $('#proxy-socks5-config');
+  const socks5HostInput = $('#socks5-host');
+  const socks5PortInput = $('#socks5-port');
+  const socks5AuthCheck = $('#socks5-auth-check');
+  const socks5AuthFields = $('#socks5-auth-fields');
+  const socks5UsernameInput = $('#socks5-username');
+  const socks5PasswordInput = $('#socks5-password');
+  const socks5SaveBtn = $('#socks5-save-btn');
   // ============== 状态变量 ==============
 
   let gmailAddress = '';
@@ -760,6 +786,7 @@
 
   function switchProxyMode(mode) {
     proxyManualConfig.style.display = mode === 'manual' ? 'block' : 'none';
+    proxySocks5Config.style.display = mode === 'socks5' ? 'block' : 'none';
     proxyApiConfig.style.display = mode === 'api' ? 'block' : 'none';
     proxyPoolConfig.style.display = mode === 'pool' ? 'block' : 'none';
   }
@@ -774,6 +801,20 @@
         proxyApiUrlInput.value = proxyConfig.apiUrl || '';
         proxyPoolList.value = proxyConfig.pool || '';
         switchProxyMode(proxyConfig.mode);
+        // 回填 socks5 字段
+        if (proxyConfig.mode === 'socks5' && proxyConfig.address) {
+          try {
+            const url = new URL(proxyConfig.address);
+            socks5HostInput.value = url.hostname || '';
+            socks5PortInput.value = url.port || '';
+            if (url.username) {
+              socks5AuthCheck.checked = true;
+              socks5AuthFields.style.display = 'block';
+              socks5UsernameInput.value = decodeURIComponent(url.username);
+              socks5PasswordInput.value = decodeURIComponent(url.password || '');
+            }
+          } catch {}
+        }
         if (proxyConfig.mode !== 'none') updateProxyStatus(true);
       }
     } catch (error) { console.error('[Proxy] 加载配置错误:', error); }
@@ -783,6 +824,15 @@
     const mode = proxyModeSelect.value;
     proxyConfig.mode = mode;
     if (mode === 'manual') proxyConfig.address = proxyAddressInput.value.trim();
+    else if (mode === 'socks5') {
+      const host = socks5HostInput.value.trim();
+      const port = socks5PortInput.value.trim();
+      if (!host || !port) { proxyStatus.textContent = '请输入 IP 和端口'; proxyStatus.classList.add('error'); return; }
+      const user = socks5AuthCheck.checked ? socks5UsernameInput.value.trim() : '';
+      const pass = socks5AuthCheck.checked ? socks5PasswordInput.value.trim() : '';
+      const auth = user && pass ? `${encodeURIComponent(user)}:${encodeURIComponent(pass)}@` : '';
+      proxyConfig.address = `socks5://${auth}${host}:${port}`;
+    }
     else if (mode === 'api') proxyConfig.apiUrl = proxyApiUrlInput.value.trim();
     else if (mode === 'pool') proxyConfig.pool = proxyPoolList.value.trim();
     try {
@@ -827,7 +877,7 @@
 
   function updateProxyStatus(saved) {
     if (!saved || proxyConfig.mode === 'none') { proxyStatus.textContent = ''; return; }
-    const labels = { manual: '手动代理', api: 'API 提取', pool: '代理池' };
+    const labels = { manual: '手动代理', socks5: 'SOCKS5', api: 'API 提取', pool: '代理池' };
     proxyStatus.textContent = `✓ 模式: ${labels[proxyConfig.mode] || proxyConfig.mode}`;
     proxyStatus.classList.remove('error');
   }
@@ -938,6 +988,10 @@
     proxySaveBtn.addEventListener('click', saveProxyConfig);
     proxyFetchBtn.addEventListener('click', fetchProxiesFromApi);
     proxyPoolSaveBtn.addEventListener('click', saveProxyConfig);
+    socks5AuthCheck.addEventListener('change', () => {
+      socks5AuthFields.style.display = socks5AuthCheck.checked ? 'block' : 'none';
+    });
+    socks5SaveBtn.addEventListener('click', saveProxyConfig);
 
     // 复制按钮
     shadow.querySelectorAll('.copy-btn').forEach(btn => {

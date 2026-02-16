@@ -481,6 +481,13 @@
       return PAGE_TYPES.LOGIN;
     }
 
+    // 姓名页 - DOM 回退（URL 未匹配时，通过输入框特征检测）
+    // 此时已排除登录页（无 email 输入框），如果存在 name 输入框则为姓名页
+    const nameInputFallback = $('input[placeholder="Maria José Silva"], input[placeholder*="name" i], input[name="name"], input[name="fullName"]');
+    if (nameInputFallback) {
+      return PAGE_TYPES.NAME;
+    }
+
     return PAGE_TYPES.UNKNOWN;
   }
 
@@ -543,7 +550,14 @@
       return false;
     }
 
-    const nameInput = $('input[placeholder="Maria José Silva"], input[placeholder*="name" i], input[name="name"], input[name="fullName"]');
+    // 等待姓名输入框出现（SPA 页面 DOM 可能延迟渲染）
+    let nameInput = null;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      nameInput = $('input[placeholder="Maria José Silva"], input[placeholder*="name" i], input[name="name"], input[name="fullName"]');
+      if (nameInput) break;
+      await randomDelay(150, 300);
+    }
+
     if (!nameInput) {
       return false;
     }
