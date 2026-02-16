@@ -104,10 +104,11 @@ export function applyFingerprint(config) {
         defProp(NavigatorUAData.prototype, 'mobile', () => false);
 
         const origGetHigh = NavigatorUAData.prototype.getHighEntropyValues;
+        const fakePlatformVersion = nav.platformVersion || '10.0.19045';
         const patchedGetHigh = function (hints) {
           return origGetHigh.call(this, hints).then(result => {
             result.platform = 'Windows';
-            result.platformVersion = '10.0.0';
+            result.platformVersion = fakePlatformVersion;
             result.uaFullVersion = chromeVer;
             result.architecture = 'x86';
             result.model = '';
@@ -509,19 +510,141 @@ export function applyFingerprint(config) {
 
   // ============== WebRTC ==============
   const webrtcCfg = config.webrtc;
-  if (webrtcCfg && webrtcCfg.blockLocal) {
-    if (typeof RTCPeerConnection !== 'undefined') {
-      const OrigRTC = window.RTCPeerConnection;
-      const RTCProxy = new Proxy(OrigRTC, {
-        construct(target, args) {
-          const cfg = args[0] || {};
-          cfg.iceTransportPolicy = 'relay';
-          args[0] = cfg;
-          return new target(...args);
-        },
-      });
-      Object.defineProperty(window, 'RTCPeerConnection', { value: RTCProxy, writable: true, configurable: true });
+  if (webrtcCfg && typeof RTCPeerConnection !== 'undefined') {
+    // 生成确定性的假内网 IP（基于配置种子，每个会话不同但稳定）
+    const fakeLocalIP = (() => {
+      const s = hashSeed;
+      // 192.168.x.x 范围的假内网 IP
+      const octet3 = Math.floor(s * 255) % 256;
+      const octet4 = (Math.floor(s * 65535) % 254) + 1; // 1-254
+      return `192.168.${octet3}.${octet4}`;
+    })();
+    const fakeMdns = crypto.randomUUID() + '.local';
+
+    const OrigRTC = window.RTCPeerConnection;
+
+    // 替换 candidate 中的真实 IP
+    function sanitizeCandidate(candidate) {
+      if (!candidate || !candidate.candidate) return candidate;
+      const sdp = candidate.candidate;
+
+      // 匹配 host 类型的候选（包含真实本地 IP）
+      // 格式: candidate:... typ host ...
+      if (sdp.includes(' typ host ')) {
+        // 替换 IP 地址为假 IP（IPv4 格式: x.x.x.x）
+        const sanitized = sdp.replace(
+          /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/,
+          fakeLocalIP
+        );
+        return new RTCIceCandidate({
+          candidate: sanitized,
+          sdpMid: candidate.sdpMid,
+          sdpMLineIndex: candidate.sdpMLineIndex,
+        });
+      }
+
+      // srflx（服务器反射）候选包含真实公网 IP，直接丢弃
+      if (sdp.includes(' typ srflx ')) {
+        return null;
+      }
+
+      // relay 候选保留（TURN 服务器 IP，不泄露用户信息）
+      return candidate;
     }
+
+    const RTCProxy = new Proxy(OrigRTC, {
+      construct(target, args) {
+        const pc = new target(...args);
+
+        // 拦截 onicecandidate 事件
+        const origAddEventListener = pc.addEventListener.bind(pc);
+        pc.addEventListener = function (type, listener, options) {
+          if (type === 'icecandidate' && typeof listener === 'function') {
+            const wrappedListener = function (event) {
+              if (event.candidate) {
+                const sanitized = sanitizeCandidate(event.candidate);
+                if (sanitized === null) return; // 丢弃 srflx 候选
+                // 创建新事件对象
+                const newEvent = new RTCPeerConnectionIceEvent('icecandidate', {
+                  candidate: sanitized,
+                });
+                listener.call(this, newEvent);
+              } else {
+                // null candidate 表示收集完成，正常传递
+                listener.call(this, event);
+              }
+            };
+            return origAddEventListener('icecandidate', wrappedListener, options);
+          }
+          return origAddEventListener(type, listener, options);
+        };
+        markAsNative(pc.addEventListener);
+
+        // 拦截 onicecandidate 属性赋值
+        let _onicecandidateHandler = null;
+        Object.defineProperty(pc, 'onicecandidate', {
+          get: () => _onicecandidateHandler,
+          set: (handler) => {
+            _onicecandidateHandler = handler;
+            if (typeof handler === 'function') {
+              origAddEventListener('icecandidate', function (event) {
+                if (event.candidate) {
+                  const sanitized = sanitizeCandidate(event.candidate);
+                  if (sanitized === null) return;
+                  const newEvent = new RTCPeerConnectionIceEvent('icecandidate', {
+                    candidate: sanitized,
+                  });
+                  handler.call(pc, newEvent);
+                } else {
+                  handler.call(pc, event);
+                }
+              });
+            }
+          },
+          configurable: true,
+          enumerable: true,
+        });
+
+        // 拦截 createOffer/createAnswer 的 SDP，替换其中的 IP
+        const origCreateOffer = pc.createOffer.bind(pc);
+        pc.createOffer = function (...offerArgs) {
+          return origCreateOffer(...offerArgs).then(desc => {
+            if (desc && desc.sdp) {
+              // 替换 SDP 中 host 候选的 IP
+              desc.sdp = desc.sdp.replace(
+                /(a=candidate:.*? typ host .*?)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/g,
+                (match, prefix) => prefix + fakeLocalIP
+              );
+              // 移除 srflx 候选行
+              desc.sdp = desc.sdp.replace(/a=candidate:.*? typ srflx .*?\r?\n/g, '');
+            }
+            return desc;
+          });
+        };
+        markAsNative(pc.createOffer);
+
+        const origCreateAnswer = pc.createAnswer.bind(pc);
+        pc.createAnswer = function (...answerArgs) {
+          return origCreateAnswer(...answerArgs).then(desc => {
+            if (desc && desc.sdp) {
+              desc.sdp = desc.sdp.replace(
+                /(a=candidate:.*? typ host .*?)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/g,
+                (match, prefix) => prefix + fakeLocalIP
+              );
+              desc.sdp = desc.sdp.replace(/a=candidate:.*? typ srflx .*?\r?\n/g, '');
+            }
+            return desc;
+          });
+        };
+        markAsNative(pc.createAnswer);
+
+        return pc;
+      },
+    });
+    Object.defineProperty(RTCProxy, 'name', { value: 'RTCPeerConnection', configurable: true });
+    Object.defineProperty(RTCProxy, 'prototype', { value: OrigRTC.prototype, writable: false, configurable: false });
+    markAsNative(RTCProxy);
+    Object.defineProperty(window, 'RTCPeerConnection', { value: RTCProxy, writable: true, configurable: true });
   }
 
   // ============== ClientRects ==============

@@ -21,7 +21,7 @@
     "https://signin.aws.amazon.com/*",
     "https://*.amazonaws.com/*",
     "https://view.awsapps.com/*",
-    "http://ip-api.com/*",
+    "https://ipwho.is/*",
     "<all_urls>"
   ],
   "incognito": "spanning",

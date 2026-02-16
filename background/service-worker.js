@@ -304,42 +304,7 @@ async function runSessionRegistration(session) {
     session.lastName = lastName;
     session.password = password;
 
-    // 步骤 2: 生成邮箱（按渠道分支）
-    updateSession(session.id, { step: '生成邮箱...' });
-
-    if (mailProvider === 'moemail') {
-      // MoeMail 模式：创建临时邮箱
-      if (!moemailConfig.apiUrl || !moemailConfig.apiKey) {
-        throw new Error('未配置 MoeMail，请在插件设置中配置 API 地址和 Key');
-      }
-      session.mailClient = new MoeMailClient({
-        apiUrl: moemailConfig.apiUrl,
-        apiKey: moemailConfig.apiKey,
-        domain: moemailConfig.domain,
-      });
-      const email = await session.mailClient.createInbox();
-      session.email = email;
-      session.manualVerification = false; // MoeMail 自动获取验证码
-      updateSession(session.id, { email });
-    } else {
-      // Gmail 别名模式
-      if (!gmailBaseAddress) {
-        throw new Error('未配置 Gmail 地址，请在插件设置中配置');
-      }
-      session.mailClient = new GmailAliasClient({ baseEmail: gmailBaseAddress });
-      const nameSuffix = `${firstName.toLowerCase()}${lastName.toLowerCase()}`.slice(0, 8);
-      const email = await session.mailClient.createInbox({
-        prefix: nameSuffix,
-        mode: 'auto'
-      });
-      session.email = email;
-      session.manualVerification = true; // Gmail 需要手动输入验证码
-      updateSession(session.id, { email });
-    }
-
-    log(`[Session ${session.id}] 账号信息:`, { email: session.email, firstName, lastName });
-
-    // 步骤 3: 设置代理（必须在 OIDC 调用之前，确保 API 请求也走代理）
+    // 步骤 2: 设置代理（必须在邮箱创建和 OIDC 调用之前，确保所有请求都走代理）
     let currentProxy = null;
     if (proxyConfigData.mode !== 'none') {
       // 代理锁：确保并发会话串行使用代理
@@ -382,7 +347,42 @@ async function runSessionRegistration(session) {
       }
     }
 
-    // 步骤 4: 获取 OIDC 授权 URL（代理已生效，API 请求走代理 IP）
+    // 步骤 3: 生成邮箱（代理已生效，邮箱 API 请求也走代理）
+    updateSession(session.id, { step: '生成邮箱...' });
+
+    if (mailProvider === 'moemail') {
+      // MoeMail 模式：创建临时邮箱
+      if (!moemailConfig.apiUrl || !moemailConfig.apiKey) {
+        throw new Error('未配置 MoeMail，请在插件设置中配置 API 地址和 Key');
+      }
+      session.mailClient = new MoeMailClient({
+        apiUrl: moemailConfig.apiUrl,
+        apiKey: moemailConfig.apiKey,
+        domain: moemailConfig.domain,
+      });
+      const email = await session.mailClient.createInbox();
+      session.email = email;
+      session.manualVerification = false; // MoeMail 自动获取验证码
+      updateSession(session.id, { email });
+    } else {
+      // Gmail 别名模式
+      if (!gmailBaseAddress) {
+        throw new Error('未配置 Gmail 地址，请在插件设置中配置');
+      }
+      session.mailClient = new GmailAliasClient({ baseEmail: gmailBaseAddress });
+      const nameSuffix = `${firstName.toLowerCase()}${lastName.toLowerCase()}`.slice(0, 8);
+      const email = await session.mailClient.createInbox({
+        prefix: nameSuffix,
+        mode: 'auto'
+      });
+      session.email = email;
+      session.manualVerification = true; // Gmail 需要手动输入验证码
+      updateSession(session.id, { email });
+    }
+
+    log(`[Session ${session.id}] 账号信息:`, { email: session.email, firstName, lastName });
+
+    // 步骤 4: 获取 OIDC 授权 URL（代理已生效，所有 API 请求走代理 IP）
     updateSession(session.id, { step: '获取授权链接...' });
     session.oidcClient = new AWSDeviceAuth();
     const authInfo = await withApiLock(() => session.oidcClient.quickAuth());
@@ -412,8 +412,11 @@ async function runSessionRegistration(session) {
 
       // 先创建空白窗口，避免首次请求泄露真实 HTTP 头
       const fpScreen = session.fingerprintConfig.screen;
-      const winWidth = Math.min(fpScreen.width - 200, 1366);
-      const winHeight = Math.min(fpScreen.height - 150, 900);
+      // 窗口尺寸加入随机偏移，避免固定计算公式被关联
+      const widthOffset = 150 + Math.floor(Math.random() * 200); // 150-350
+      const heightOffset = 80 + Math.floor(Math.random() * 150);  // 80-230
+      const winWidth = Math.min(fpScreen.width - widthOffset, 1366);
+      const winHeight = Math.min(fpScreen.height - heightOffset, 900);
       const window = await chrome.windows.create({
         url: 'about:blank',
         incognito: true,
@@ -440,8 +443,8 @@ async function runSessionRegistration(session) {
 
       // 先注册指纹和 HTTP 头规则，确保首次真实请求就被伪装
       registerTabFingerprint(session.tabId, session.fingerprintConfig);
-      // 等待 declarativeNetRequest 规则生效
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // 等待 declarativeNetRequest 规则生效（100ms 可能不够，首个请求会泄露真实头）
+      await new Promise(resolve => setTimeout(resolve, 300));
 
       // 规则就绪后再导航到目标 URL
       await chrome.tabs.update(session.tabId, { url: authInfo.verificationUriComplete });
@@ -1256,6 +1259,7 @@ async function applyUAHeaderRules(tabId, fpConfig) {
   const ua = fpConfig.navigator.userAgent;
   const chromeVer = ua.match(/Chrome\/([\d.]+)/)?.[1] || '';
   const majorVer = chromeVer.split('.')[0] || '';
+  const platformVersion = fpConfig.navigator.platformVersion || '10.0.19045';
 
   // 构建 Accept-Language 头（与 JS 层 navigator.languages 一致）
   const langs = fpConfig.navigator.languages || ['en-US', 'en'];
@@ -1276,7 +1280,7 @@ async function applyUAHeaderRules(tabId, fpConfig) {
         { header: 'sec-ch-ua', operation: 'set', value: `"Chromium";v="${majorVer}", "Google Chrome";v="${majorVer}", "Not-A.Brand";v="99"` },
         { header: 'sec-ch-ua-full-version-list', operation: 'set', value: `"Chromium";v="${chromeVer}", "Google Chrome";v="${chromeVer}", "Not-A.Brand";v="99.0.0.0"` },
         { header: 'sec-ch-ua-platform', operation: 'set', value: '"Windows"' },
-        { header: 'sec-ch-ua-platform-version', operation: 'set', value: '"10.0.0"' },
+        { header: 'sec-ch-ua-platform-version', operation: 'set', value: `"${platformVersion}"` },
         { header: 'sec-ch-ua-mobile', operation: 'set', value: '?0' },
         { header: 'sec-ch-ua-arch', operation: 'set', value: '"x86"' },
         { header: 'sec-ch-ua-bitness', operation: 'set', value: '"64"' },
