@@ -5,11 +5,37 @@
 
 import { GmailAliasClient } from '../lib/mail-api.js';
 import { MoeMailClient } from '../lib/moemail-api.js';
-import { AWSDeviceAuth, validateToken, refreshAndValidateToken } from '../lib/oidc-api.js';
+import { AWSDeviceAuth, validateToken, refreshAndValidateToken, resetSessionUA } from '../lib/oidc-api.js';
 import { generatePassword, generateName, generateEmailPrefix } from '../lib/utils.js';
 import { generateFingerprintConfig } from '../lib/fingerprint.js';
 import { applyFingerprint } from '../content/fingerprint-inject.js';
 import { ProxyManager } from '../lib/proxy-manager.js';
+
+// ============== 调试开关 & 日志包装 ==============
+const DEBUG = false;
+/* eslint-disable no-console */
+function log(...args) { if (DEBUG) console.log(...args); }
+function warn(...args) { if (DEBUG) console.warn(...args); }
+function err(...args) { if (DEBUG) console.error(...args); }
+/* eslint-enable no-console */
+
+// ============== 凭据混淆 ==============
+const _OBF_PREFIX = 'obf:';
+function obfuscate(plain) {
+  if (!plain) return plain;
+  try {
+    return _OBF_PREFIX + btoa(plain.split('').reverse().join(''));
+  } catch { return plain; }
+}
+function deobfuscate(encoded) {
+  if (!encoded || !encoded.startsWith(_OBF_PREFIX)) return encoded;
+  try {
+    return atob(encoded.slice(_OBF_PREFIX.length)).split('').reverse().join('');
+  } catch { return encoded; }
+}
+
+// ============== 代理锁 ==============
+let proxyLock = Promise.resolve();
 
 // Gmail 配置
 let gmailBaseAddress = '';
@@ -77,14 +103,14 @@ function waitForTabLoad(tabId, timeout = 30000) {
     const checkTab = async () => {
       try {
         const tab = await chrome.tabs.get(tabId);
-        console.log(`[waitForTabLoad] tabId=${tabId}, status=${tab.status}, url=${tab.url}`);
+        log(`[waitForTabLoad] tabId=${tabId}, status=${tab.status}, url=${tab.url}`);
 
         if (tab.status === 'complete') {
           resolve(tab);
           return;
         }
       } catch (e) {
-        console.error(`[waitForTabLoad] tabId=${tabId} 获取失败:`, e);
+        err(`[waitForTabLoad] tabId=${tabId} 获取失败:`, e);
         reject(new Error('标签页已关闭或不存在'));
         return;
       }
@@ -223,7 +249,7 @@ async function destroySession(sessionId) {
     try {
       await session.mailClient.deleteInbox();
     } catch (e) {
-      console.warn(`[Session ${session.id}] MoeMail 邮箱清理失败:`, e.message);
+      warn(`[Session ${session.id}] MoeMail 邮箱清理失败:`, e.message);
     }
   }
   session.mailClient = null;
@@ -252,8 +278,8 @@ async function withApiLock(fn) {
   try {
     return await fn();
   } finally {
-    // API 调用后延迟一小段时间再释放锁
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // API 调用后延迟随机时间再释放锁，避免固定节奏
+    await new Promise(resolve => setTimeout(resolve, 3000 + Math.random() * 5000));
     releaseLock();
   }
 }
@@ -266,6 +292,9 @@ async function runSessionRegistration(session) {
     session.status = 'running';
     session.pollAbort = false;
     updateSession(session.id, { step: '初始化...' });
+
+    // 重置 OIDC UA，每个会话使用不同的版本号
+    resetSessionUA();
 
     // 步骤 1: 生成账号信息（先生成，用于邮箱前缀）
     updateSession(session.id, { step: '生成账号信息...' });
@@ -308,11 +337,16 @@ async function runSessionRegistration(session) {
       updateSession(session.id, { email });
     }
 
-    console.log(`[Session ${session.id}] 账号信息:`, { email: session.email, firstName, lastName });
+    log(`[Session ${session.id}] 账号信息:`, { email: session.email, firstName, lastName });
 
     // 步骤 3: 设置代理（必须在 OIDC 调用之前，确保 API 请求也走代理）
     let currentProxy = null;
     if (proxyConfigData.mode !== 'none') {
+      // 代理锁：确保并发会话串行使用代理
+      await proxyLock;
+      let releaseProxyLock;
+      proxyLock = new Promise(resolve => { releaseProxyLock = resolve; });
+
       updateSession(session.id, { step: '设置代理...' });
       try {
         if (proxyConfigData.mode === 'manual' || proxyConfigData.mode === 'socks5') {
@@ -338,11 +372,13 @@ async function runSessionRegistration(session) {
           await proxyManager.applyProxy(currentProxy);
           // 等待代理生效
           await new Promise(resolve => setTimeout(resolve, 300));
-          console.log(`[Session ${session.id}] 代理已设置: ${currentProxy.host}:${currentProxy.port}`);
+          log(`[Session ${session.id}] 代理已设置: ${currentProxy.host}:${currentProxy.port}`);
         }
       } catch (e) {
-        console.warn(`[Session ${session.id}] 代理设置失败:`, e.message);
+        warn(`[Session ${session.id}] 代理设置失败:`, e.message);
         // 代理失败不中断注册流程
+      } finally {
+        releaseProxyLock();
       }
     }
 
@@ -352,7 +388,7 @@ async function runSessionRegistration(session) {
     const authInfo = await withApiLock(() => session.oidcClient.quickAuth());
     session.oidcAuth = authInfo;
 
-    console.log(`[Session ${session.id}] OIDC 授权信息:`, authInfo.verificationUriComplete);
+    log(`[Session ${session.id}] OIDC 授权信息:`, authInfo.verificationUriComplete);
 
     // 步骤 5: 生成指纹配置（结合代理 IP 地理位置）
     let geoInfo = null;
@@ -361,7 +397,7 @@ async function runSessionRegistration(session) {
       geoInfo = await proxyManager.getGeoLocation(currentProxy.host);
     }
     session.fingerprintConfig = generateFingerprintConfig(undefined, geoInfo);
-    console.log(`[Session ${session.id}] 指纹配置:`, session.fingerprintConfig.navigator.platform, session.fingerprintConfig.screen.width + 'x' + session.fingerprintConfig.screen.height, '时区:', session.fingerprintConfig.timezone.name);
+    log(`[Session ${session.id}] 指纹配置:`, session.fingerprintConfig.navigator.platform, session.fingerprintConfig.screen.width + 'x' + session.fingerprintConfig.screen.height, '时区:', session.fingerprintConfig.timezone.name);
 
     // 步骤 6: 打开无痕窗口（使用锁防止同时创建多个窗口）
     updateSession(session.id, { step: '打开无痕窗口...' });
@@ -372,7 +408,7 @@ async function runSessionRegistration(session) {
     windowCreationLock = new Promise(resolve => { releaseLock = resolve; });
 
     try {
-      console.log(`[Session ${session.id}] 准备创建无痕窗口，URL:`, authInfo.verificationUriComplete);
+      log(`[Session ${session.id}] 准备创建无痕窗口，URL:`, authInfo.verificationUriComplete);
 
       // 先创建空白窗口，避免首次请求泄露真实 HTTP 头
       const fpScreen = session.fingerprintConfig.screen;
@@ -409,23 +445,23 @@ async function runSessionRegistration(session) {
 
       // 规则就绪后再导航到目标 URL
       await chrome.tabs.update(session.tabId, { url: authInfo.verificationUriComplete });
-      console.log(`[Session ${session.id}] 无痕窗口创建成功: windowId=${window.id}, tabId=${session.tabId}`);
+      log(`[Session ${session.id}] 无痕窗口创建成功: windowId=${window.id}, tabId=${session.tabId}`);
 
       // 等待页面加载完成
       updateSession(session.id, { step: '等待页面加载...' });
       try {
         await waitForTabLoad(session.tabId, 30000);
-        console.log(`[Session ${session.id}] 页面已加载`);
+        log(`[Session ${session.id}] 页面已加载`);
       } catch (e) {
-        console.warn(`[Session ${session.id}] 等待页面加载:`, e.message);
+        warn(`[Session ${session.id}] 等待页面加载:`, e.message);
         // 即使超时也继续，content script 会处理
       }
 
-      // 额外等待一小段时间让 content script 初始化
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // 额外等待随机时间让 content script 初始化
+      await new Promise(resolve => setTimeout(resolve, 800 + Math.random() * 1500));
 
     } catch (error) {
-      console.error(`[Session ${session.id}] 创建无痕窗口错误:`, error);
+      err(`[Session ${session.id}] 创建无痕窗口错误:`, error);
 
       // 根据错误类型给出详细提示
       let errorMsg = '创建无痕窗口失败';
@@ -469,7 +505,7 @@ async function runSessionRegistration(session) {
         token: {
           ...tokenResult,
           clientId: session.oidcAuth?.clientId || '',
-          clientSecret: session.oidcAuth?.clientSecret || ''
+          clientSecret: obfuscate(session.oidcAuth?.clientSecret || '')
         }
       };
 
@@ -479,7 +515,7 @@ async function runSessionRegistration(session) {
     }
 
   } catch (error) {
-    console.error(`[Session ${session.id}] 注册失败:`, error);
+    err(`[Session ${session.id}] 注册失败:`, error);
     session.status = 'error';
     session.error = error.message;
     updateSession(session.id, { step: '失败: ' + error.message });
@@ -530,12 +566,12 @@ async function pollSessionToken(session) {
     try {
       const result = await session.oidcClient.getToken();
       if (result) {
-        console.log(`[Session ${session.id}] Token 获取成功`);
+        log(`[Session ${session.id}] Token 获取成功`);
         return result;
       }
     } catch (error) {
       if (!error.message.includes('authorization_pending')) {
-        console.error(`[Session ${session.id}] Token 轮询错误:`, error);
+        err(`[Session ${session.id}] Token 轮询错误:`, error);
       }
     }
 
@@ -554,7 +590,7 @@ function saveToHistory(session, success) {
     tokenInfo = {
       ...session.token,
       clientId: session.oidcAuth?.clientId || '',
-      clientSecret: session.oidcAuth?.clientSecret || ''
+      clientSecret: obfuscate(session.oidcAuth?.clientSecret || '')
     };
   }
 
@@ -603,8 +639,8 @@ async function validateAllTokens() {
     return results;
   }
 
-  // 并发验证（每批 5 个）
-  const concurrency = 5;
+  // 并发验证（每批 2 个，降低限流风险）
+  const concurrency = 2;
   let validated = 0;
 
   // 通知开始验证
@@ -620,10 +656,10 @@ async function validateAllTokens() {
     const batchResults = await Promise.allSettled(
       batch.map(async (record) => {
         try {
-          // 使用刷新并验证的方法
+          // 使用刷新并验证的方法（deobfuscate clientSecret）
           const result = await refreshAndValidateToken({
             clientId: record.token.clientId,
-            clientSecret: record.token.clientSecret,
+            clientSecret: deobfuscate(record.token.clientSecret),
             refreshToken: record.token.refreshToken
           });
 
@@ -701,7 +737,7 @@ async function validateAllTokens() {
 
     // 批次间延迟，避免限流
     if (i + concurrency < recordsToValidate.length) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 3000 + Math.random() * 3000));
     }
   }
 
@@ -755,7 +791,7 @@ async function startBatchRegistration(loopCount, concurrency, gmailAddress, opti
       const proxies = await proxyManager.fetchFromApi(proxyConfigData.apiUrl);
       proxyManager.setPool(proxies);
     } catch (e) {
-      console.warn('[Service Worker] 代理 API 提取失败:', e.message);
+      warn('[Service Worker] 代理 API 提取失败:', e.message);
     }
   } else if (proxyConfigData.mode === 'pool' && proxyConfigData.pool) {
     const lines = proxyConfigData.pool.split(/[\r\n]+/).filter(l => l.trim());
@@ -781,7 +817,7 @@ async function startBatchRegistration(loopCount, concurrency, gmailAddress, opti
   sessions.clear();
   broadcastState();
 
-  console.log(`[Service Worker] 开始批量注册: 目标=${loopCount}, 并发=${concurrency}, 邮箱渠道=${mailProvider}, 代理=${proxyConfigData.mode}`);
+  log(`[Service Worker] 开始批量注册: 目标=${loopCount}, 并发=${concurrency}, 邮箱渠道=${mailProvider}, 代理=${proxyConfigData.mode}`);
 
   // 创建任务队列
   taskQueue = [];
@@ -813,19 +849,19 @@ async function startBatchRegistration(loopCount, concurrency, gmailAddress, opti
  * 工作线程 - 从队列取任务执行
  */
 async function runWorker(workerId) {
-  console.log(`[Worker ${workerId}] 启动`);
+  log(`[Worker ${workerId}] 启动`);
 
   // 错开启动时间，避免同时创建窗口和调用 API
   // 第一个 worker 立即启动，后续 worker 等待更长时间
   if (workerId > 0) {
-    await new Promise(resolve => setTimeout(resolve, workerId * 3000));
+    await new Promise(resolve => setTimeout(resolve, workerId * (2000 + Math.random() * 3000)));
   }
 
   while (!shouldStop && taskQueue.length > 0) {
     const taskIndex = taskQueue.shift();
     if (taskIndex === undefined) break;
 
-    console.log(`[Worker ${workerId}] 执行任务 #${taskIndex + 1}`);
+    log(`[Worker ${workerId}] 执行任务 #${taskIndex + 1}`);
 
     // 清理已完成的旧会话，只保留活跃的
     for (const [id, s] of sessions) {
@@ -851,20 +887,20 @@ async function runWorker(workerId) {
       step: `进度 ${doneAfter}/${globalState.totalTarget}`
     });
 
-    // 任务间延迟
+    // 任务间延迟（随机化，避免固定节奏）
     if (!shouldStop && taskQueue.length > 0) {
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      await new Promise(resolve => setTimeout(resolve, 8000 + Math.random() * 7000));
     }
   }
 
-  console.log(`[Worker ${workerId}] 结束`);
+  log(`[Worker ${workerId}] 结束`);
 }
 
 /**
  * 停止注册
  */
 function stopRegistration() {
-  console.log('[Service Worker] 停止注册');
+  log('[Service Worker] 停止注册');
   shouldStop = true;
   taskQueue = [];
 
@@ -927,13 +963,13 @@ async function getVerificationCode(session) {
 
   // MoeMail 模式：自动获取验证码
   if (!session.manualVerification && session.mailClient && session.mailClient instanceof MoeMailClient) {
-    console.log(`[Session ${session.id}] MoeMail 模式，自动获取验证码...`);
+    log(`[Session ${session.id}] MoeMail 模式，自动获取验证码...`);
     updateSession(session.id, { step: '等待验证码...' });
 
     try {
       const code = await session.mailClient.waitForVerificationCode(120000);
       if (code) {
-        console.log(`[Session ${session.id}] MoeMail 验证码: ${code}`);
+        log(`[Session ${session.id}] MoeMail 验证码: ${code}`);
         return { success: true, code };
       } else {
         return { success: false, error: 'MoeMail 验证码获取超时' };
@@ -944,7 +980,7 @@ async function getVerificationCode(session) {
   }
 
   // Gmail 别名模式下，需要用户手动输入验证码
-  console.log(`[Session ${session.id}] Gmail 别名模式，等待用户手动输入验证码`);
+  log(`[Session ${session.id}] Gmail 别名模式，等待用户手动输入验证码`);
 
   // 如果会话中已经有验证码（用户已输入），则返回
   if (session.verificationCode) {
@@ -968,11 +1004,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const session = senderWindowId ? findSessionByWindowId(senderWindowId) : null;
 
   if (sender.tab) {
-    console.log('[Service Worker] 收到消息:', message.type,
+    log('[Service Worker] 收到消息:', message.type,
       'tabId:', sender.tab.id, 'windowId:', senderWindowId,
       'session:', session?.id || 'none');
   } else {
-    console.log('[Service Worker] 收到消息:', message.type, '(popup)');
+    log('[Service Worker] 收到消息:', message.type, '(popup)');
   }
 
   switch (message.type) {
@@ -1003,14 +1039,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         getVerificationCode(session).then(sendResponse);
         return true;
       } else {
-        console.warn('[Service Worker] GET_VERIFICATION_CODE: 找不到会话, windowId:', senderWindowId);
+        warn('[Service Worker] GET_VERIFICATION_CODE: 找不到会话, windowId:', senderWindowId);
         sendResponse({ success: false, error: '找不到对应会话' });
       }
       break;
 
     case 'GET_ACCOUNT_INFO':
       if (session) {
-        console.log(`[Service Worker] GET_ACCOUNT_INFO: 会话 ${session.id}, email: ${session.email}`);
+        log(`[Service Worker] GET_ACCOUNT_INFO: 会话 ${session.id}, email: ${session.email}`);
         sendResponse({
           email: session.email,
           password: session.password,
@@ -1025,7 +1061,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const existingSessions = Array.from(sessions.values()).map(s =>
           `${s.id}(windowId:${s.windowId})`
         ).join(', ');
-        console.warn('[Service Worker] GET_ACCOUNT_INFO: 找不到会话',
+        warn('[Service Worker] GET_ACCOUNT_INFO: 找不到会话',
           'senderWindowId:', senderWindowId,
           '现有会话:', existingSessions || '无');
         sendResponse({});
@@ -1108,8 +1144,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const resp = await fetch(message.url, fetchOptions);
           const body = await resp.text();
           sendResponse({ ok: resp.ok, status: resp.status, body });
-        } catch (err) {
-          sendResponse({ error: err.message });
+        } catch (e) {
+          sendResponse({ error: e.message });
         }
       })();
       return true;
@@ -1132,7 +1168,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (tab.incognito && changeInfo.status === 'loading') {
     const session = findSessionByWindowId(tab.windowId);
     if (session && session.tabId !== tabId) {
-      console.log(`[Service Worker] 会话 ${session.id} 标签页更新: ${session.tabId} -> ${tabId}`);
+      log(`[Service Worker] 会话 ${session.id} 标签页更新: ${session.tabId} -> ${tabId}`);
       unregisterTabFingerprint(session.tabId);
       session.tabId = tabId;
       registerTabFingerprint(tabId, session.fingerprintConfig);
@@ -1144,7 +1180,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 chrome.windows.onRemoved.addListener((windowId) => {
   const session = findSessionByWindowId(windowId);
   if (session) {
-    console.log(`[Service Worker] 会话 ${session.id} 的窗口已关闭`);
+    log(`[Service Worker] 会话 ${session.id} 的窗口已关闭`);
     unregisterTabFingerprint(session.tabId);
     session.windowId = null;
     session.tabId = null;
@@ -1252,7 +1288,7 @@ async function applyUAHeaderRules(tabId, fpConfig) {
       addRules: [rule]
     });
   } catch (e) {
-    console.warn('[Service Worker] 设置 UA header 规则失败:', e.message);
+    warn('[Service Worker] 设置 UA header 规则失败:', e.message);
   }
 }
 
@@ -1268,21 +1304,21 @@ async function removeUAHeaderRules(tabId) {
 
 // Service Worker 激活时恢复状态
 chrome.runtime.onInstalled.addListener(() => {
-  console.log('[Service Worker] 扩展已安装/更新');
+  log('[Service Worker] 扩展已安装/更新');
 });
 
 // 恢复历史记录
 chrome.storage.local.get(['registrationHistory']).then((stored) => {
   if (stored.registrationHistory) {
     registrationHistory = stored.registrationHistory;
-    console.log('[Service Worker] 恢复历史记录:', registrationHistory.length, '条');
+    log('[Service Worker] 恢复历史记录:', registrationHistory.length, '条');
   }
 });
 
 // ============== 扩展图标点击 → 注入面板 ==============
 
 chrome.action.onClicked.addListener(async (tab) => {
-  console.log('[Service Worker] 扩展图标被点击, tabId:', tab.id, 'url:', tab.url);
+  log('[Service Worker] 扩展图标被点击, tabId:', tab.id, 'url:', tab.url);
 
   // 受限页面：在当前 tab 打开一个空白页再注入
   const restricted = !tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('edge://') ||
@@ -1317,15 +1353,15 @@ chrome.action.onClicked.addListener(async (tab) => {
 
     if (result.result) {
       chrome.tabs.sendMessage(targetTabId, { type: 'TOGGLE_PANEL' }).catch(() => {});
-      console.log('[Service Worker] 面板已存在，切换显示');
+      log('[Service Worker] 面板已存在，切换显示');
     } else {
       await chrome.scripting.executeScript({
         target: { tabId: targetTabId },
         files: ['content/panel.js']
       });
-      console.log('[Service Worker] 面板已注入到 tabId:', targetTabId);
+      log('[Service Worker] 面板已注入到 tabId:', targetTabId);
     }
-  } catch (err) {
-    console.error('[Service Worker] 面板操作失败:', err.message);
+  } catch (e) {
+    err('[Service Worker] 面板操作失败:', e.message);
   }
 });

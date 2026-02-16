@@ -3,6 +3,10 @@
  * 支持自定义循环次数和多窗口并发
  */
 
+const _DEBUG = false;
+const _log = (...a) => { if (_DEBUG) console.log(...a); };
+const _err = (...a) => { if (_DEBUG) console.error(...a); };
+
 // DOM 元素
 const statusDot = document.getElementById('status-dot');
 const statusText = document.getElementById('status-text');
@@ -93,7 +97,7 @@ let poolUser = null;
  * 更新 UI 状态
  */
 function updateUI(state) {
-  console.log('[Popup] 更新 UI:', state);
+  _log('[Popup] 更新 UI:', state);
 
   // 状态指示器
   statusDot.className = 'dot';
@@ -419,7 +423,7 @@ async function copyToClipboard(text, button) {
       button.textContent = originalText;
     }, 1500);
   } catch (err) {
-    console.error('复制失败:', err);
+    _err('复制失败:', err);
   }
 }
 
@@ -479,13 +483,13 @@ async function startRegistration() {
       proxyApiUrl: proxyConfig.apiUrl,
       proxyPool: proxyConfig.pool,
     });
-    console.log('[Popup] 注册响应:', response);
+    _log('[Popup] 注册响应:', response);
 
     if (response.state) {
       updateUI(response.state);
     }
   } catch (error) {
-    console.error('[Popup] 注册错误:', error);
+    _err('[Popup] 注册错误:', error);
     updateUI({
       status: 'error',
       error: error.message
@@ -502,7 +506,7 @@ async function stopRegistration() {
   try {
     await chrome.runtime.sendMessage({ type: 'STOP_REGISTRATION' });
   } catch (error) {
-    console.error('[Popup] 停止错误:', error);
+    _err('[Popup] 停止错误:', error);
   }
 }
 
@@ -520,7 +524,7 @@ async function reset() {
       updateUI({ status: 'idle', history: [] });
     }
   } catch (error) {
-    console.error('[Popup] 重置错误:', error);
+    _err('[Popup] 重置错误:', error);
   }
 }
 
@@ -579,7 +583,7 @@ async function exportHistory() {
     }
 
   } catch (error) {
-    console.error('[Popup] 导出错误:', error);
+    _err('[Popup] 导出错误:', error);
   }
 }
 
@@ -623,7 +627,7 @@ async function exportHistoryCSV() {
     a.click();
     URL.revokeObjectURL(url);
   } catch (error) {
-    console.error('[Popup] 导出 CSV 错误:', error);
+    _err('[Popup] 导出 CSV 错误:', error);
   }
 }
 
@@ -639,7 +643,7 @@ async function clearHistory() {
     await chrome.runtime.sendMessage({ type: 'CLEAR_HISTORY' });
     renderHistory([]);
   } catch (error) {
-    console.error('[Popup] 清空错误:', error);
+    _err('[Popup] 清空错误:', error);
   }
 }
 
@@ -663,7 +667,7 @@ async function validateAllTokens() {
     chrome.runtime.onMessage.addListener(progressListener);
 
     const response = await chrome.runtime.sendMessage({ type: 'VALIDATE_ALL_TOKENS' });
-    console.log('[Popup] 验证结果:', response);
+    _log('[Popup] 验证结果:', response);
 
     // 移除进度监听器
     chrome.runtime.onMessage.removeListener(progressListener);
@@ -692,7 +696,7 @@ async function validateAllTokens() {
     }
 
   } catch (error) {
-    console.error('[Popup] 验证错误:', error);
+    _err('[Popup] 验证错误:', error);
     validateSection.classList.add('validate-result');
     validateText.textContent = '验证失败: ' + error.message;
   } finally {
@@ -737,7 +741,7 @@ async function loadMoemailConfig() {
       switchMailProvider(result.mailProvider);
     }
   } catch (error) {
-    console.error('[MoeMail] 加载配置错误:', error);
+    _err('[MoeMail] 加载配置错误:', error);
   }
 }
 
@@ -812,7 +816,7 @@ async function loadProxyConfig() {
       }
     }
   } catch (error) {
-    console.error('[Proxy] 加载配置错误:', error);
+    _err('[Proxy] 加载配置错误:', error);
   }
 }
 
@@ -912,7 +916,7 @@ async function loadGmailConfig() {
       updateGmailStatus(true);
     }
   } catch (error) {
-    console.error('[Gmail] 加载配置错误:', error);
+    _err('[Gmail] 加载配置错误:', error);
   }
 }
 
@@ -940,7 +944,7 @@ async function saveGmailConfig() {
     await chrome.storage.local.set({ gmailAddress: email });
     updateGmailStatus(true);
   } catch (error) {
-    console.error('[Gmail] 保存配置错误:', error);
+    _err('[Gmail] 保存配置错误:', error);
     gmailStatus.textContent = '保存失败: ' + error.message;
     gmailStatus.classList.add('error');
   }
@@ -973,7 +977,7 @@ async function loadPoolConfig() {
       await connectToPool();
     }
   } catch (error) {
-    console.error('[Pool] 加载配置错误:', error);
+    _err('[Pool] 加载配置错误:', error);
   }
 }
 
@@ -1014,7 +1018,7 @@ async function connectToPool() {
     updatePoolUI();
 
   } catch (error) {
-    console.error('[Pool] 连接错误:', error);
+    _err('[Pool] 连接错误:', error);
     alert('连接失败: ' + error.message);
   } finally {
     poolConnectBtn.disabled = false;
@@ -1125,7 +1129,7 @@ async function uploadToPool() {
     alert(message);
 
   } catch (error) {
-    console.error('[Pool] 上传错误:', error);
+    _err('[Pool] 上传错误:', error);
     alert('上传失败: ' + error.message);
   } finally {
     poolUploadBtn.disabled = false;
@@ -1144,7 +1148,7 @@ async function init() {
       updateUI(response.state);
     }
   } catch (error) {
-    console.error('[Popup] 获取状态错误:', error);
+    _err('[Popup] 获取状态错误:', error);
   }
 
   // 加载 Gmail 配置

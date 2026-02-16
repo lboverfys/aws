@@ -12,6 +12,14 @@ export function applyFingerprint(config) {
 
   if (!config) return;
 
+  // 基于配置生成确定性种子（用于 performance.memory 等需要随机但稳定的值）
+  let hashSeed = 0;
+  try {
+    const seedStr = JSON.stringify(config.canvas || {});
+    for (let i = 0; i < seedStr.length; i++) hashSeed = ((hashSeed << 5) - hashSeed + seedStr.charCodeAt(i)) & 0x7FFFFFFF;
+    hashSeed = (hashSeed % 10000) / 10000;
+  } catch (_) { hashSeed = 0.5; }
+
   // ============== Native toString 伪装系统（最先初始化）==============
   const nativeToString = Function.prototype.toString;
   const patchedFunctions = new WeakSet();
@@ -27,6 +35,16 @@ export function applyFingerprint(config) {
     return nativeToString.call(this);
   };
   markAsNative(Function.prototype.toString);
+
+  // 保护 toString 伪装不被 Reflect.apply 绕过
+  const origReflectApply = Reflect.apply;
+  Reflect.apply = function (target, thisArg, argsList) {
+    if (target === nativeToString && patchedFunctions.has(thisArg)) {
+      return 'function ' + (thisArg.name || '') + '() { [native code] }';
+    }
+    return origReflectApply(target, thisArg, argsList);
+  };
+  markAsNative(Reflect.apply);
 
   // 辅助：定义属性并自动标记 getter 为 native
   // 使用 configurable: true 匹配原生属性行为
@@ -689,17 +707,42 @@ export function applyFingerprint(config) {
     });
   }
 
-  // ============== matchMedia 屏幕一致性 ==============
+  // ============== matchMedia 屏幕一致性 + CSS 媒体特征伪装 ==============
   if (config.screen) {
     const sw = config.screen.width;
     const origMatchMedia = window.matchMedia;
     defMethod(window, 'matchMedia', function (query) {
       let q = query;
+      // 屏幕宽度一致性
       q = q.replace(/\(\s*(max-|min-)?device-width\s*:\s*\d+px\s*\)/g, (m, prefix) => {
         return `(${prefix || ''}device-width: ${sw}px)`;
       });
+      // 强制 prefers-color-scheme: light（避免暗色模式泄露系统偏好）
+      q = q.replace(/\(\s*prefers-color-scheme\s*:\s*dark\s*\)/gi, '(prefers-color-scheme: __never_match__)');
+      q = q.replace(/\(\s*prefers-color-scheme\s*:\s*light\s*\)/gi, '(prefers-color-scheme: light)');
+      // 强制 prefers-reduced-motion: no-preference
+      q = q.replace(/\(\s*prefers-reduced-motion\s*:\s*reduce\s*\)/gi, '(prefers-reduced-motion: __never_match__)');
+      // 强制 forced-colors: none
+      q = q.replace(/\(\s*forced-colors\s*:\s*active\s*\)/gi, '(forced-colors: __never_match__)');
+      // 强制 prefers-contrast: no-preference
+      q = q.replace(/\(\s*prefers-contrast\s*:\s*(more|less|custom)\s*\)/gi, '(prefers-contrast: __never_match__)');
       return origMatchMedia.call(window, q);
     });
+  }
+
+  // ============== performance.memory 伪装 ==============
+  if (typeof Performance !== 'undefined' && performance.memory) {
+    const memCfg = config.performanceMemory || {};
+    const fakeJsHeapSizeLimit = memCfg.jsHeapSizeLimit || (2172649472 + Math.floor(hashSeed * 1073741824));
+    const fakeTotalJSHeapSize = Math.floor(fakeJsHeapSizeLimit * (0.15 + hashSeed * 0.25));
+    const fakeUsedJSHeapSize = Math.floor(fakeTotalJSHeapSize * (0.5 + hashSeed * 0.4));
+    const fakeMemory = {
+      jsHeapSizeLimit: fakeJsHeapSizeLimit,
+      totalJSHeapSize: fakeTotalJSHeapSize,
+      usedJSHeapSize: fakeUsedJSHeapSize,
+    };
+    Object.freeze(fakeMemory);
+    defProp(Performance.prototype, 'memory', () => fakeMemory);
   }
 
   // ============== OffscreenCanvas ==============
@@ -781,6 +824,30 @@ export function applyFingerprint(config) {
       if (name.includes(extPattern)) return [];
       return origGetEntriesByName.call(this, name, type).filter(e => !e.name.includes(extPattern));
     });
+
+    // PerformanceObserver 代理：过滤 chrome-extension:// 条目
+    if (typeof PerformanceObserver !== 'undefined') {
+      const OrigPerfObserver = PerformanceObserver;
+      const PerfObserverProxy = new Proxy(OrigPerfObserver, {
+        construct(target, args) {
+          const origCallback = args[0];
+          if (typeof origCallback === 'function') {
+            args[0] = function (list, observer) {
+              const origGetEntries = list.getEntries.bind(list);
+              list.getEntries = function () {
+                return origGetEntries().filter(e => !e.name || !e.name.includes(extPattern));
+              };
+              return origCallback.call(this, list, observer);
+            };
+          }
+          return new target(...args);
+        }
+      });
+      Object.defineProperty(PerfObserverProxy, 'name', { value: 'PerformanceObserver', configurable: true });
+      Object.defineProperty(PerfObserverProxy, 'prototype', { value: OrigPerfObserver.prototype, writable: false, configurable: false });
+      markAsNative(PerfObserverProxy);
+      window.PerformanceObserver = PerfObserverProxy;
+    }
   }
 
   // ============== Error.stack 清理 ==============

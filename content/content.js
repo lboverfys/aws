@@ -96,7 +96,7 @@
           </svg>
         </div>
         <div class="toast-text">
-          <div class="toast-title">AWS Auto</div>
+          <div class="toast-title">Auto</div>
           <div class="toast-step"></div>
           <div class="toast-counter" style="display:none;"></div>
         </div>
@@ -177,7 +177,7 @@
     } else {
       // 进行中状态 (running, polling_token, initializing 等)
       const isMultiWindow = state.totalTarget > 1 || (state.sessions && state.sessions.length > 1);
-      toastContent.title.textContent = isMultiWindow ? '批量注册中' : 'AWS 自动注册';
+      toastContent.title.textContent = isMultiWindow ? '批量注册中' : '自动注册';
       toastContent.icon.classList.add('spinning');
       toastContent.icon.innerHTML = `
         <svg viewBox="0 0 24 24" fill="none" stroke="#ff9900" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -348,6 +348,27 @@
   }
 
   /**
+   * 根据字符返回正确的 KeyboardEvent.code
+   */
+  function charToCode(char) {
+    if (char >= 'a' && char <= 'z') return 'Key' + char.toUpperCase();
+    if (char >= 'A' && char <= 'Z') return 'Key' + char;
+    if (char >= '0' && char <= '9') return 'Digit' + char;
+    const map = {
+      ' ': 'Space', '.': 'Period', ',': 'Comma', '/': 'Slash',
+      '\\': 'Backslash', '-': 'Minus', '=': 'Equal', ';': 'Semicolon',
+      "'": 'Quote', '`': 'Backquote', '[': 'BracketLeft', ']': 'BracketRight',
+      '@': 'Digit2', '!': 'Digit1', '#': 'Digit3', '$': 'Digit4',
+      '%': 'Digit5', '^': 'Digit6', '&': 'Digit7', '*': 'Digit8',
+      '(': 'Digit9', ')': 'Digit0', '_': 'Minus', '+': 'Equal',
+      '{': 'BracketLeft', '}': 'BracketRight', '|': 'Backslash',
+      ':': 'Semicolon', '"': 'Quote', '<': 'Comma', '>': 'Period',
+      '?': 'Slash', '~': 'Backquote',
+    };
+    return map[char] || 'Unidentified';
+  }
+
+  /**
    * 模拟真实用户输入（逐字符输入，触发正确的事件序列）
    */
   async function humanFill(el, text) {
@@ -363,9 +384,10 @@
     // 逐字符输入
     for (let i = 0; i < text.length; i++) {
       const char = text[i];
+      const code = charToCode(char);
 
       // keydown
-      el.dispatchEvent(new KeyboardEvent('keydown', { key: char, code: 'Key' + char.toUpperCase(), bubbles: true, cancelable: true }));
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: char, code, bubbles: true, cancelable: true }));
 
       // 设置值
       nativeSetter.call(el, text.slice(0, i + 1));
@@ -374,11 +396,12 @@
       el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: char }));
 
       // keyup
-      el.dispatchEvent(new KeyboardEvent('keyup', { key: char, code: 'Key' + char.toUpperCase(), bubbles: true, cancelable: true }));
+      el.dispatchEvent(new KeyboardEvent('keyup', { key: char, code, bubbles: true, cancelable: true }));
 
-      // 每个字符之间随机间隔 30-80ms（模拟打字速度）
+      // 每个字符之间随机间隔（模拟真实打字速度，偶尔有停顿）
       if (i < text.length - 1) {
-        await randomDelay(30, 80);
+        const pause = Math.random() < 0.08 ? 200 + Math.random() * 400 : 30 + Math.random() * 90;
+        await randomDelay(pause * 0.8, pause * 1.2);
       }
     }
 
@@ -387,9 +410,9 @@
   }
 
   /**
-   * 模拟真实点击（鼠标移动序列 + 可信点击）
+   * 模拟真实点击（鼠标移动序列 + 随机延迟 + 可信点击）
    */
-  function humanClick(btn) {
+  async function humanClick(btn) {
     if (!btn) return false;
 
     if (btn.offsetParent === null || btn.disabled) {
@@ -402,13 +425,17 @@
     const y = rect.top + rect.height * (0.3 + Math.random() * 0.4);
     const eventInit = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 };
 
-    // 鼠标移动序列（增加真实感，isTrusted 不影响这些事件）
+    // 鼠标移动序列（带随机延迟模拟真实鼠标轨迹）
     btn.dispatchEvent(new MouseEvent('mouseover', eventInit));
     btn.dispatchEvent(new MouseEvent('mouseenter', { ...eventInit, bubbles: false }));
+    await randomDelay(12, 35);
     btn.dispatchEvent(new MouseEvent('mousemove', eventInit));
+    await randomDelay(20, 55);
     btn.dispatchEvent(new MouseEvent('mousedown', eventInit));
     btn.focus();
+    await randomDelay(40, 120);
     btn.dispatchEvent(new MouseEvent('mouseup', eventInit));
+    await randomDelay(5, 15);
 
     // 使用 btn.click() 触发可信点击（isTrusted: true）
     btn.click();
@@ -504,10 +531,10 @@
   /**
    * 处理 Cookie 弹窗
    */
-  function handleCookiePopup() {
+  async function handleCookiePopup() {
     const btn = $('button[data-id="awsccc-cb-btn-accept"]');
     if (btn) {
-      humanClick(btn);
+      await humanClick(btn);
     }
   }
 
@@ -533,7 +560,7 @@
 
     updateStep('点击继续...');
     const btn = $('button[data-testid="test-primary-button"], button[type="submit"], button.awsui-button-variant-primary');
-    if (btn) humanClick(btn);
+    if (btn) await humanClick(btn);
 
     return true;
   }
@@ -567,7 +594,7 @@
 
     updateStep('点击继续...');
     const btn = $('button[data-testid="signup-next-button"], button[type="submit"], button.awsui-button-variant-primary');
-    if (btn) humanClick(btn);
+    if (btn) await humanClick(btn);
 
     return true;
   }
@@ -604,7 +631,7 @@
 
     updateStep('点击验证...');
     const btn = $('button[data-testid="email-verification-verify-button"], button[type="submit"], button.awsui-button-variant-primary');
-    if (btn) humanClick(btn);
+    if (btn) await humanClick(btn);
 
     return true;
   }
@@ -654,7 +681,7 @@
 
     updateStep('点击继续...');
     const btn = $('button[data-testid="test-primary-button"], button[type="submit"], button.awsui-button-variant-primary');
-    if (btn) humanClick(btn);
+    if (btn) await humanClick(btn);
 
     return true;
   }
@@ -668,7 +695,7 @@
 
     // 尝试多种选择器
     const btn = $('button#cli_verification_btn, button[data-testid="confirm-device-button"], button[type="submit"]');
-    if (btn && humanClick(btn)) {
+    if (btn && await humanClick(btn)) {
       updateStep('已确认设备，等待授权页...');
       return true;
     }
@@ -676,7 +703,7 @@
     // 如果找不到按钮，尝试查找所有包含 "Confirm" 文字的按钮
     const buttons = document.querySelectorAll('button');
     for (const b of buttons) {
-      if (b.textContent.includes('Confirm') && humanClick(b)) {
+      if (b.textContent.includes('Confirm') && await humanClick(b)) {
         updateStep('已确认设备，等待授权页...');
         return true;
       }
@@ -694,7 +721,7 @@
 
     // 尝试多种选择器
     const btn = $('button#cli_login_button, button[data-testid="allow-access-button"], input[type="submit"][value*="Allow"]');
-    if (btn && humanClick(btn)) {
+    if (btn && await humanClick(btn)) {
       updateStep('已允许访问，等待完成...');
       chrome.runtime.sendMessage({ type: 'AUTH_COMPLETED' }).catch(() => {});
       return true;
@@ -704,7 +731,7 @@
     const buttons = document.querySelectorAll('button, input[type="submit"]');
     for (const b of buttons) {
       const text = b.textContent || b.value || '';
-      if (text.includes('Allow') && humanClick(b)) {
+      if (text.includes('Allow') && await humanClick(b)) {
         updateStep('已允许访问，等待完成...');
         chrome.runtime.sendMessage({ type: 'AUTH_COMPLETED' }).catch(() => {});
         return true;
@@ -741,7 +768,7 @@
     }
 
     isProcessing = true;
-    handleCookiePopup();
+    await handleCookiePopup();
 
     const pageType = detectPageType();
 
@@ -792,12 +819,12 @@
     // 立即执行一次
     processPage();
 
-    // 使用随机间隔轮询（400-700ms），避免固定节奏被检测
+    // 使用随机间隔轮询（300-1200ms），避免固定节奏被检测
     function scheduleNext() {
       pollInterval = setTimeout(() => {
         processPage();
         if (pollInterval) scheduleNext();
-      }, 400 + Math.random() * 300);
+      }, 300 + Math.random() * 900);
     }
     scheduleNext();
   }

@@ -5,6 +5,12 @@
 (function () {
   'use strict';
 
+  // 调试开关
+  const _DEBUG = false;
+  const _log = (...a) => { if (_DEBUG) console.log(...a); };
+  const _warn = (...a) => { if (_DEBUG) console.warn(...a); };
+  const _err = (...a) => { if (_DEBUG) console.error(...a); };
+
   // 防重复注入：使用随机 data 属性，避免可预测的 ID 被页面检测
   const PANEL_ATTR = '__p' + Math.random().toString(36).slice(2, 8);
   const existing = document.querySelector(`[data-ext-panel]`);
@@ -27,7 +33,7 @@
   shadow.appendChild(style);
   chrome.runtime.sendMessage({ type: 'GET_PANEL_CSS' })
     .then(resp => { if (resp?.css) style.textContent = resp.css; })
-    .catch(e => console.warn('[Panel] CSS 加载失败:', e));
+    .catch(e => _warn('[Panel] CSS 加载失败:', e));
 
   // ============== 构建 HTML ==============
 
@@ -370,7 +376,7 @@
   // ============== UI 更新 ==============
 
   function updateUI(state) {
-    console.log('[Panel] 更新 UI:', state);
+    _log('[Panel] 更新 UI:', state);
 
     statusDot.className = 'dot';
     switch (state.status) {
@@ -572,7 +578,7 @@
       button.textContent = '已复制';
       setTimeout(() => { button.classList.remove('copied'); button.textContent = orig; }, 1500);
     } catch (err) {
-      console.error('复制失败:', err);
+      _err('复制失败:', err);
     }
   }
 
@@ -613,7 +619,7 @@
       });
       if (response.state) updateUI(response.state);
     } catch (error) {
-      console.error('[Panel] 注册错误:', error);
+      _err('[Panel] 注册错误:', error);
       updateUI({ status: 'error', error: error.message });
     } finally {
       startBtn.disabled = false;
@@ -622,7 +628,7 @@
 
   async function stopRegistration() {
     try { await chrome.runtime.sendMessage({ type: 'STOP_REGISTRATION' }); }
-    catch (error) { console.error('[Panel] 停止错误:', error); }
+    catch (error) { _err('[Panel] 停止错误:', error); }
   }
 
   async function reset() {
@@ -630,7 +636,7 @@
       await chrome.runtime.sendMessage({ type: 'RESET' });
       const response = await chrome.runtime.sendMessage({ type: 'GET_STATE' });
       updateUI(response?.state || { status: 'idle', history: [] });
-    } catch (error) { console.error('[Panel] 重置错误:', error); }
+    } catch (error) { _err('[Panel] 重置错误:', error); }
   }
 
   async function exportHistory() {
@@ -657,7 +663,7 @@
       if (validRecords.length < totalSuccess) {
         await showAlert(`已导出 ${validRecords.length} 个有效账号（共 ${totalSuccess} 个成功注册，${totalSuccess - validRecords.length} 个被过滤）`);
       }
-    } catch (error) { console.error('[Panel] 导出错误:', error); }
+    } catch (error) { _err('[Panel] 导出错误:', error); }
   }
 
   async function exportHistoryCSV() {
@@ -674,7 +680,7 @@
       ]);
       const csv = [headers,...rows].map(row => row.map(cell => `"${(cell||'').replace(/"/g,'""')}"`).join(',')).join('\n');
       triggerDownload('\uFEFF' + csv, `accounts-${new Date().toISOString().slice(0, 10)}.csv`, 'text/csv;charset=utf-8');
-    } catch (error) { console.error('[Panel] 导出 CSV 错误:', error); }
+    } catch (error) { _err('[Panel] 导出 CSV 错误:', error); }
   }
 
   function triggerDownload(content, filename, mimeType) {
@@ -695,7 +701,7 @@
     try {
       await chrome.runtime.sendMessage({ type: 'CLEAR_HISTORY' });
       renderHistory([]);
-    } catch (error) { console.error('[Panel] 清空错误:', error); }
+    } catch (error) { _err('[Panel] 清空错误:', error); }
   }
 
   async function validateAllTokens() {
@@ -730,7 +736,7 @@
       const stateResponse = await chrome.runtime.sendMessage({ type: 'GET_STATE' });
       if (stateResponse?.state) updateUI(stateResponse.state);
     } catch (error) {
-      console.error('[Panel] 验证错误:', error);
+      _err('[Panel] 验证错误:', error);
       validateSection.classList.add('validate-result');
       validateText.textContent = '验证失败: ' + error.message;
     } finally {
@@ -759,7 +765,7 @@
         mailProviderSelect.value = result.mailProvider;
         switchMailProvider(result.mailProvider);
       }
-    } catch (error) { console.error('[MoeMail] 加载配置错误:', error); }
+    } catch (error) { _err('[MoeMail] 加载配置错误:', error); }
   }
 
   async function saveMoemailConfig() {
@@ -817,7 +823,7 @@
         }
         if (proxyConfig.mode !== 'none') updateProxyStatus(true);
       }
-    } catch (error) { console.error('[Proxy] 加载配置错误:', error); }
+    } catch (error) { _err('[Proxy] 加载配置错误:', error); }
   }
 
   async function saveProxyConfig() {
@@ -892,7 +898,7 @@
         gmailAddressInput.value = gmailAddress;
         updateGmailStatus(true);
       }
-    } catch (error) { console.error('[Gmail] 加载配置错误:', error); }
+    } catch (error) { _err('[Gmail] 加载配置错误:', error); }
   }
 
   async function saveGmailConfig() {
@@ -954,7 +960,7 @@
     try {
       const response = await chrome.runtime.sendMessage({ type: 'GET_STATE' });
       if (response?.state) updateUI(response.state);
-    } catch (error) { console.error('[Panel] 获取状态错误:', error); }
+    } catch (error) { _err('[Panel] 获取状态错误:', error); }
 
     await loadGmailConfig();
     await loadMoemailConfig();
