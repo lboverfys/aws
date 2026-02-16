@@ -1102,7 +1102,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case 'EXPORT_HISTORY':
-      sendResponse({ history: registrationHistory });
+      // 导出时自动解混淆 clientSecret，方便外部直接使用
+      sendResponse({
+        history: registrationHistory.map(r => {
+          if (r.token?.clientSecret) {
+            return { ...r, token: { ...r.token, clientSecret: deobfuscate(r.token.clientSecret) } };
+          }
+          return r;
+        })
+      });
       break;
 
     case 'VALIDATE_TOKEN':
