@@ -83,7 +83,8 @@
       <div class="proxy-mode-select">
         <select id="proxy-mode" class="provider-select">
           <option value="none">不使用代理</option>
-          <option value="manual">手动配置</option>
+          <option value="manual">手动配置 (HTTP)</option>
+          <option value="socks5">SOCKS5 代理</option>
           <option value="api">API 提取</option>
           <option value="pool">代理池</option>
           <option value="subscription">订阅</option>
@@ -95,6 +96,14 @@
         <div class="gmail-input-row">
           <input type="text" id="proxy-address" placeholder="host:port:user:pass" class="gmail-input">
           <button id="proxy-save-btn" class="btn-small">保存</button>
+        </div>
+      </div>
+
+      <!-- SOCKS5 模式 -->
+      <div id="proxy-socks5-config" class="proxy-config-panel" style="display:none">
+        <div class="gmail-input-row">
+          <input type="text" id="proxy-socks5-address" placeholder="host:port:user:pass" class="gmail-input">
+          <button id="proxy-socks5-save-btn" class="btn-small">保存</button>
         </div>
       </div>
 

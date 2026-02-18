@@ -11,7 +11,7 @@ import { generateFingerprintConfig } from '../lib/fingerprint.js';
 import { applyFingerprint } from '../content/fingerprint-inject.js';
 import { ProxyManager } from '../lib/proxy-manager.js';
 import { fetchSubscription } from '../lib/subscription-parser.js';
-import { generateXrayConfig } from '../lib/xray-config-generator.js';
+import { generateXrayConfig, generateSocks5XrayConfig } from '../lib/xray-config-generator.js';
 
 // ============== 调试开关 & 日志包装 ==============
 const DEBUG = false;
@@ -319,8 +319,22 @@ async function runSessionRegistration(session) {
 
       updateSession(session.id, { step: '设置代理...' });
       try {
-        if (proxyConfigData.mode === 'manual' || proxyConfigData.mode === 'socks5') {
+        if (proxyConfigData.mode === 'manual') {
           currentProxy = proxyManager.parseProxy(proxyConfigData.address);
+        } else if (proxyConfigData.mode === 'socks5') {
+          // socks5 模式：强制使用 socks5 协议
+          const parsed = proxyManager.parseProxy(proxyConfigData.address, 'socks5');
+          if (parsed && parsed.username && parsed.password) {
+            // SOCKS5 带认证：Chrome 无法原生处理 SOCKS5 认证，通过 xray 本地转发
+            const xrayConfig = generateSocks5XrayConfig(parsed, 0);
+            updateSession(session.id, { step: `启动 SOCKS5 代理: ${parsed.host}:${parsed.port}...` });
+            const localPort = await proxyManager.startSubscriptionProxy(session.id, xrayConfig);
+            currentProxy = { scheme: 'socks5', host: '127.0.0.1', port: localPort, username: '', password: '' };
+            log(`[Session ${session.id}] SOCKS5 代理已启动 (xray): ${parsed.host}:${parsed.port} -> 127.0.0.1:${localPort}`);
+          } else {
+            // SOCKS5 无认证：直接使用 PAC 脚本
+            currentProxy = parsed;
+          }
         } else if (proxyConfigData.mode === 'api') {
           // 从 API 提取代理列表（如果池为空）
           if (proxyManager.proxyPool.length === 0 && proxyConfigData.apiUrl) {
@@ -416,7 +430,28 @@ async function runSessionRegistration(session) {
     session.fingerprintConfig = generateFingerprintConfig(undefined, geoInfo);
     log(`[Session ${session.id}] 指纹配置:`, session.fingerprintConfig.navigator.platform, session.fingerprintConfig.screen.width + 'x' + session.fingerprintConfig.screen.height, '时区:', session.fingerprintConfig.timezone.name);
 
-    // 步骤 6: 打开无痕窗口（使用锁防止同时创建多个窗口）
+    // 步骤 6: 清除无痕模式 Cookie（防止会话间 Cookie 关联）
+    updateSession(session.id, { step: '清理会话痕迹...' });
+    try {
+      const awsDomains = [
+        '.amazonaws.com', '.aws.amazon.com', '.signin.aws',
+        '.awsapps.com', 'oidc.us-east-1.amazonaws.com'
+      ];
+      for (const domain of awsDomains) {
+        const cookies = await chrome.cookies.getAll({ domain, storeId: '1' }).catch(() => []);
+        for (const cookie of cookies) {
+          await chrome.cookies.remove({
+            url: `https://${cookie.domain.replace(/^\./, '')}${cookie.path}`,
+            name: cookie.name,
+            storeId: cookie.storeId
+          }).catch(() => {});
+        }
+      }
+    } catch (_) {
+      // Cookie 清理失败不中断流程
+    }
+
+    // 步骤 7: 打开无痕窗口（使用锁防止同时创建多个窗口）
     updateSession(session.id, { step: '打开无痕窗口...' });
 
     // 等待获取窗口创建锁
@@ -460,8 +495,8 @@ async function runSessionRegistration(session) {
 
       // 先注册指纹和 HTTP 头规则，确保首次真实请求就被伪装
       registerTabFingerprint(session.tabId, session.fingerprintConfig);
-      // 等待 declarativeNetRequest 规则生效（100ms 可能不够，首个请求会泄露真实头）
-      await new Promise(resolve => setTimeout(resolve, 300));
+      // 等待 declarativeNetRequest 规则生效（需要足够时间，否则首个请求泄露真实头）
+      await new Promise(resolve => setTimeout(resolve, 500));
 
       // 规则就绪后再导航到目标 URL
       await chrome.tabs.update(session.tabId, { url: authInfo.verificationUriComplete });
@@ -560,8 +595,8 @@ async function runSessionRegistration(session) {
       await proxyManager.clearProxy();
     }
 
-    // 停止订阅代理 xray 实例
-    if (proxyConfigData.mode === 'subscription') {
+    // 停止订阅代理 / SOCKS5 xray 实例
+    if (proxyConfigData.mode === 'subscription' || proxyConfigData.mode === 'socks5') {
       await proxyManager.stopSubscriptionProxy(session.id);
     }
 
@@ -786,6 +821,14 @@ async function startBatchRegistration(loopCount, concurrency, gmailAddress, opti
   // 设置邮箱渠道
   mailProvider = options.mailProvider || 'gmail';
 
+  // 使用代理时强制并发为 1，因为 chrome.proxy.settings 是全局的，
+  // 并发会导致多个会话互相覆盖代理设置，造成 IP/指纹不匹配
+  const proxyMode = options.proxyMode || 'none';
+  if (proxyMode !== 'none' && concurrency > 1) {
+    warn('[Service Worker] 使用代理时强制并发为 1，避免代理冲突');
+    concurrency = 1;
+  }
+
   if (mailProvider === 'gmail') {
     if (!gmailAddress) {
       return { success: false, error: '未配置 Gmail 地址' };
@@ -871,8 +914,8 @@ async function startBatchRegistration(loopCount, concurrency, gmailAddress, opti
 
   await Promise.all(workers);
 
-  // 清理订阅代理
-  if (proxyConfigData.mode === 'subscription') {
+  // 清理订阅代理 / SOCKS5 xray 实例
+  if (proxyConfigData.mode === 'subscription' || proxyConfigData.mode === 'socks5') {
     await proxyManager.stopAllSubscriptionProxies();
     proxyManager.disconnectNativeHost();
   }
@@ -1331,6 +1374,7 @@ async function applyUAHeaderRules(tabId, fpConfig) {
   const chromeVer = ua.match(/Chrome\/([\d.]+)/)?.[1] || '';
   const majorVer = chromeVer.split('.')[0] || '';
   const platformVersion = fpConfig.navigator.platformVersion || '10.0.19045';
+  const notABrandVer = fpConfig.navigator.notABrandVersion || '99';
 
   // 构建 Accept-Language 头（与 JS 层 navigator.languages 一致）
   const langs = fpConfig.navigator.languages || ['en-US', 'en'];
@@ -1348,14 +1392,16 @@ async function applyUAHeaderRules(tabId, fpConfig) {
       type: 'modifyHeaders',
       requestHeaders: [
         { header: 'User-Agent', operation: 'set', value: ua },
-        { header: 'sec-ch-ua', operation: 'set', value: `"Chromium";v="${majorVer}", "Google Chrome";v="${majorVer}", "Not-A.Brand";v="99"` },
-        { header: 'sec-ch-ua-full-version-list', operation: 'set', value: `"Chromium";v="${chromeVer}", "Google Chrome";v="${chromeVer}", "Not-A.Brand";v="99.0.0.0"` },
+        { header: 'sec-ch-ua', operation: 'set', value: `"Chromium";v="${majorVer}", "Google Chrome";v="${majorVer}", "Not-A.Brand";v="${notABrandVer}"` },
+        { header: 'sec-ch-ua-full-version', operation: 'set', value: `"${chromeVer}"` },
+        { header: 'sec-ch-ua-full-version-list', operation: 'set', value: `"Chromium";v="${chromeVer}", "Google Chrome";v="${chromeVer}", "Not-A.Brand";v="${notABrandVer}.0.0.0"` },
         { header: 'sec-ch-ua-platform', operation: 'set', value: '"Windows"' },
         { header: 'sec-ch-ua-platform-version', operation: 'set', value: `"${platformVersion}"` },
         { header: 'sec-ch-ua-mobile', operation: 'set', value: '?0' },
         { header: 'sec-ch-ua-arch', operation: 'set', value: '"x86"' },
         { header: 'sec-ch-ua-bitness', operation: 'set', value: '"64"' },
         { header: 'sec-ch-ua-model', operation: 'set', value: '""' },
+        { header: 'sec-ch-ua-wow64', operation: 'set', value: '?0' },
         { header: 'Accept-Language', operation: 'set', value: acceptLang },
       ]
     },

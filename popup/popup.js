@@ -59,10 +59,13 @@ const moemailStatus = document.getElementById('moemail-status');
 // 代理配置元素
 const proxyModeSelect = document.getElementById('proxy-mode');
 const proxyManualConfig = document.getElementById('proxy-manual-config');
+const proxySocks5Config = document.getElementById('proxy-socks5-config');
 const proxyApiConfig = document.getElementById('proxy-api-config');
 const proxyPoolConfig = document.getElementById('proxy-pool-config');
 const proxyAddressInput = document.getElementById('proxy-address');
+const proxySocks5AddressInput = document.getElementById('proxy-socks5-address');
 const proxySaveBtn = document.getElementById('proxy-save-btn');
+const proxySocks5SaveBtn = document.getElementById('proxy-socks5-save-btn');
 const proxyApiUrlInput = document.getElementById('proxy-api-url');
 const proxyFetchBtn = document.getElementById('proxy-fetch-btn');
 const proxyPoolList = document.getElementById('proxy-pool-list');
@@ -799,6 +802,7 @@ function updateMoemailStatus(saved) {
  */
 function switchProxyMode(mode) {
   proxyManualConfig.style.display = mode === 'manual' ? 'block' : 'none';
+  proxySocks5Config.style.display = mode === 'socks5' ? 'block' : 'none';
   proxyApiConfig.style.display = mode === 'api' ? 'block' : 'none';
   proxyPoolConfig.style.display = mode === 'pool' ? 'block' : 'none';
   proxySubscriptionConfig.style.display = mode === 'subscription' ? 'block' : 'none';
@@ -814,6 +818,7 @@ async function loadProxyConfig() {
       proxyConfig = result.proxyConfig;
       proxyModeSelect.value = proxyConfig.mode || 'none';
       proxyAddressInput.value = proxyConfig.address || '';
+      proxySocks5AddressInput.value = proxyConfig.address || '';
       proxyApiUrlInput.value = proxyConfig.apiUrl || '';
       proxyPoolList.value = proxyConfig.pool || '';
       if (proxyConfig.subscriptionUrl) {
@@ -838,6 +843,8 @@ async function saveProxyConfig() {
 
   if (mode === 'manual') {
     proxyConfig.address = proxyAddressInput.value.trim();
+  } else if (mode === 'socks5') {
+    proxyConfig.address = proxySocks5AddressInput.value.trim();
   } else if (mode === 'api') {
     proxyConfig.apiUrl = proxyApiUrlInput.value.trim();
   } else if (mode === 'pool') {
@@ -908,7 +915,7 @@ function updateProxyStatus(saved) {
     proxyStatus.textContent = '';
     return;
   }
-  const modeLabels = { manual: '手动代理', api: 'API 提取', pool: '代理池', subscription: '订阅' };
+  const modeLabels = { manual: 'HTTP 代理', socks5: 'SOCKS5 代理', api: 'API 提取', pool: '代理池', subscription: '订阅' };
   proxyStatus.textContent = `✓ 模式: ${modeLabels[proxyConfig.mode] || proxyConfig.mode}`;
   proxyStatus.classList.remove('error');
 }
@@ -1257,6 +1264,7 @@ async function init() {
     updateProxyStatus(e.target.value !== 'none');
   });
   proxySaveBtn.addEventListener('click', saveProxyConfig);
+  proxySocks5SaveBtn.addEventListener('click', saveProxyConfig);
   proxyFetchBtn.addEventListener('click', fetchProxiesFromApi);
   proxyPoolSaveBtn.addEventListener('click', saveProxyConfig);
   proxySubscriptionFetchBtn.addEventListener('click', fetchSubscriptionNodes);

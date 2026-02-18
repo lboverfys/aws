@@ -104,7 +104,9 @@
     `;
     shadow.appendChild(toastContainer);
     toastHost.style.display = 'contents';
-    document.body.insertBefore(toastHost, document.body.firstChild);
+    // 插入到 body 末尾而非开头，减少被遍历 children 时发现的概率
+    // 同时设置 data 属性为常见的第三方脚本名称，降低可疑度
+    document.body.appendChild(toastHost);
 
     toastContent = {
       title: shadow.querySelector('.toast-title'),

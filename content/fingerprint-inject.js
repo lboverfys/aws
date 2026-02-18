@@ -70,6 +70,9 @@ export function applyFingerprint(config) {
   // ============== Anti-Automation Detection ==============
   defProp(Navigator.prototype, 'webdriver', () => false);
 
+  // pdfViewerEnabled — 真实 Chrome 始终为 true，headless/自动化环境可能为 false
+  defProp(Navigator.prototype, 'pdfViewerEnabled', () => true);
+
   // 清除 ChromeDriver 痕迹
   try { delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array; } catch (_) {}
   try { delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise; } catch (_) {}
@@ -94,10 +97,11 @@ export function applyFingerprint(config) {
         const majorVer = chromeVer.split('.')[0] || '';
 
         // 伪装低熵 brands（最关键，直接暴露真实版本）
+        const notABrandVer = nav.notABrandVersion || '99';
         const fakeBrands = Object.freeze([
           Object.freeze({ brand: 'Chromium', version: majorVer }),
           Object.freeze({ brand: 'Google Chrome', version: majorVer }),
-          Object.freeze({ brand: 'Not-A.Brand', version: '99' }),
+          Object.freeze({ brand: 'Not-A.Brand', version: notABrandVer }),
         ]);
         defProp(NavigatorUAData.prototype, 'brands', () => fakeBrands);
         defProp(NavigatorUAData.prototype, 'platform', () => 'Windows');
@@ -162,12 +166,15 @@ export function applyFingerprint(config) {
       // 基于数据长度生成伪随机种子
       let seed = len ^ (canvasCfg.noiseR * 17 + canvasCfg.noiseG * 31 + canvasCfg.noiseB * 53);
       for (let i = 0; i < len; i += 4) {
-        // 简单 LCG 伪随机，决定是否对这个像素加噪声（约 1/8 的像素）
+        // LCG 伪随机，使用变化的阈值（5~11），避免固定 1/8 模式被统计检测
         seed = (seed * 1664525 + 1013904223) & 0xFFFFFFFF;
-        if ((seed & 7) === 0) {
-          data[i]     = Math.max(0, Math.min(255, data[i] + canvasCfg.noiseR));
+        const threshold = 5 + ((seed >>> 28) & 7); // 5-12 之间变化
+        if ((seed & 15) < threshold) {
+          // 噪声幅度也加入微小随机变化
+          const vary = ((seed >>> 16) & 1) ? 1 : 0;
+          data[i]     = Math.max(0, Math.min(255, data[i] + canvasCfg.noiseR + vary));
           data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + canvasCfg.noiseG));
-          data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + canvasCfg.noiseB));
+          data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + canvasCfg.noiseB + vary));
         }
       }
     }
@@ -444,9 +451,17 @@ export function applyFingerprint(config) {
     const origResolved = OrigDTF.prototype.resolvedOptions;
     defMethod(OrigDTF.prototype, 'resolvedOptions', function () {
       const opts = origResolved.call(this);
+      // 只在用户未显式指定 timeZone 时覆盖（与 Proxy construct 逻辑一致）
+      // 如果 resolvedOptions 返回的时区与伪装时区不同，说明是用户显式指定的，保留原值
+      // 注意：DTFProxy 的 construct 已经在未指定时注入了 tzCfg.name，
+      // 所以这里只需要确保一致性
       opts.timeZone = tzCfg.name;
       return opts;
     });
+
+    // 伪装 Date 构造函数中的时区解析行为
+    // 当 new Date(string) 解析含时区的字符串时，结果不受 getTimezoneOffset 影响
+    // 但 Date.parse 和 new Date() 无参数版本会使用系统时区，需要保持一致
   }
 
   // ============== Fonts ==============
@@ -543,8 +558,8 @@ export function applyFingerprint(config) {
         });
       }
 
-      // srflx（服务器反射）候选包含真实公网 IP，直接丢弃
-      if (sdp.includes(' typ srflx ')) {
+      // srflx（服务器反射）和 prflx（对端反射）候选包含真实公网 IP，直接丢弃
+      if (sdp.includes(' typ srflx ') || sdp.includes(' typ prflx ')) {
         return null;
       }
 
@@ -615,8 +630,8 @@ export function applyFingerprint(config) {
                 /(a=candidate:.*? typ host .*?)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/g,
                 (match, prefix) => prefix + fakeLocalIP
               );
-              // 移除 srflx 候选行
-              desc.sdp = desc.sdp.replace(/a=candidate:.*? typ srflx .*?\r?\n/g, '');
+              // 移除 srflx 和 prflx 候选行
+              desc.sdp = desc.sdp.replace(/a=candidate:.*? typ (?:srflx|prflx) .*?\r?\n/g, '');
             }
             return desc;
           });
@@ -645,6 +660,11 @@ export function applyFingerprint(config) {
     Object.defineProperty(RTCProxy, 'prototype', { value: OrigRTC.prototype, writable: false, configurable: false });
     markAsNative(RTCProxy);
     Object.defineProperty(window, 'RTCPeerConnection', { value: RTCProxy, writable: true, configurable: true });
+
+    // 同时伪装 webkitRTCPeerConnection（部分指纹脚本使用 webkit 前缀）
+    if (window.webkitRTCPeerConnection) {
+      Object.defineProperty(window, 'webkitRTCPeerConnection', { value: RTCProxy, writable: true, configurable: true });
+    }
   }
 
   // ============== ClientRects ==============
@@ -691,20 +711,9 @@ export function applyFingerprint(config) {
     defProp(connProto, 'saveData', () => connCfg.saveData);
   }
 
-  // ============== Performance.now 精度降低 ==============
-  const perfCfg = config.performance;
-  if (perfCfg && perfCfg.precision) {
-    const precision = perfCfg.precision;
-    const origNow = Performance.prototype.now;
-    defMethod(Performance.prototype, 'now', function () {
-      return Math.round(origNow.call(this) / precision) * precision;
-    });
-    try {
-      const origTimeOrigin = performance.timeOrigin;
-      defProp(Performance.prototype, 'timeOrigin',
-        () => Math.round(origTimeOrigin / precision) * precision);
-    } catch (_) {}
-  }
+  // ============== Performance.now ==============
+  // 注意：不降低 performance.now 精度，因为真实 Chrome 不会这样做，
+  // 降低精度反而成为可检测的 bot 特征。保留原生行为。
 
   // ============== MediaDevices ==============
   const mediaCfg = config.mediaDevices;
@@ -884,10 +893,12 @@ export function applyFingerprint(config) {
           let seed = data.length ^ (canvasCfg.noiseR * 17);
           for (let i = 0; i < data.length; i += 4) {
             seed = (seed * 1664525 + 1013904223) & 0xFFFFFFFF;
-            if ((seed & 7) === 0) {
-              data[i]     = Math.max(0, Math.min(255, data[i] + canvasCfg.noiseR));
+            const threshold = 5 + ((seed >>> 28) & 7);
+            if ((seed & 15) < threshold) {
+              const vary = ((seed >>> 16) & 1) ? 1 : 0;
+              data[i]     = Math.max(0, Math.min(255, data[i] + canvasCfg.noiseR + vary));
               data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + canvasCfg.noiseG));
-              data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + canvasCfg.noiseB));
+              data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + canvasCfg.noiseB + vary));
             }
           }
           return imageData;
@@ -997,6 +1008,14 @@ export function applyFingerprint(config) {
     meta.content = 'off';
     (document.head || document.documentElement).appendChild(meta);
   } catch (_) {}
+
+  // ============== 额外隐私属性一致性 ==============
+  // globalPrivacyControl — 真实 Chrome 默认不存在此属性，确保不泄露
+  if ('globalPrivacyControl' in navigator) {
+    try { delete Navigator.prototype.globalPrivacyControl; } catch (_) {
+      defProp(Navigator.prototype, 'globalPrivacyControl', () => undefined);
+    }
+  }
 
   // 注入完成（不输出日志，避免被页面检测）
 }
