@@ -10,6 +10,8 @@ import { generatePassword, generateName, generateEmailPrefix } from '../lib/util
 import { generateFingerprintConfig } from '../lib/fingerprint.js';
 import { applyFingerprint } from '../content/fingerprint-inject.js';
 import { ProxyManager } from '../lib/proxy-manager.js';
+import { fetchSubscription } from '../lib/subscription-parser.js';
+import { generateXrayConfig } from '../lib/xray-config-generator.js';
 
 // ============== 调试开关 & 日志包装 ==============
 const DEBUG = false;
@@ -45,6 +47,9 @@ let moemailConfig = { apiUrl: '', apiKey: '', domain: '' };
 
 // 代理配置
 let proxyConfigData = { mode: 'none', address: '', apiUrl: '', pool: '' };
+
+// 订阅节点缓存
+let subscriptionNodes = [];
 
 // 邮箱渠道
 let mailProvider = 'gmail';
@@ -331,6 +336,18 @@ async function runSessionRegistration(session) {
             proxyManager.setPool(proxies);
           }
           currentProxy = proxyManager.getNextProxy();
+        } else if (proxyConfigData.mode === 'subscription') {
+          // 订阅模式：随机选节点 → 启动 xray → 拿到本地端口
+          if (subscriptionNodes.length === 0) {
+            throw new Error('订阅节点列表为空，请先提取订阅');
+          }
+          const nodeIndex = Math.floor(Math.random() * subscriptionNodes.length);
+          const node = subscriptionNodes[nodeIndex];
+          const xrayConfig = generateXrayConfig(node, 0); // 端口由 native host 分配
+          updateSession(session.id, { step: `启动代理: ${node.name || node.host}...` });
+          const localPort = await proxyManager.startSubscriptionProxy(session.id, xrayConfig);
+          currentProxy = { scheme: 'socks5', host: '127.0.0.1', port: localPort, username: '', password: '' };
+          log(`[Session ${session.id}] 订阅代理已启动: ${node.name || node.host} -> 127.0.0.1:${localPort}`);
         }
 
         if (currentProxy) {
@@ -541,6 +558,11 @@ async function runSessionRegistration(session) {
     // 清除代理
     if (proxyConfigData.mode !== 'none') {
       await proxyManager.clearProxy();
+    }
+
+    // 停止订阅代理 xray 实例
+    if (proxyConfigData.mode === 'subscription') {
+      await proxyManager.stopSubscriptionProxy(session.id);
     }
 
     // MoeMail 模式清理临时邮箱
@@ -786,6 +808,7 @@ async function startBatchRegistration(loopCount, concurrency, gmailAddress, opti
     address: options.proxyAddress || '',
     apiUrl: options.proxyApiUrl || '',
     pool: options.proxyPool || '',
+    subscriptionUrl: options.proxySubscriptionUrl || '',
   };
 
   // 如果使用 API 代理模式，预先提取代理列表
@@ -800,6 +823,18 @@ async function startBatchRegistration(loopCount, concurrency, gmailAddress, opti
     const lines = proxyConfigData.pool.split(/[\r\n]+/).filter(l => l.trim());
     const proxies = lines.map(l => proxyManager.parseProxy(l)).filter(Boolean);
     proxyManager.setPool(proxies);
+  } else if (proxyConfigData.mode === 'subscription' && proxyConfigData.subscriptionUrl) {
+    // 订阅模式：获取并解析节点
+    try {
+      subscriptionNodes = await fetchSubscription(proxyConfigData.subscriptionUrl);
+      log(`[Service Worker] 订阅解析成功: ${subscriptionNodes.length} 个节点`);
+      if (subscriptionNodes.length === 0) {
+        return { success: false, error: '订阅链接未返回有效节点' };
+      }
+    } catch (e) {
+      warn('[Service Worker] 订阅解析失败:', e.message);
+      return { success: false, error: '订阅解析失败: ' + e.message };
+    }
   }
 
   isRunning = true;
@@ -835,6 +870,12 @@ async function startBatchRegistration(loopCount, concurrency, gmailAddress, opti
   }
 
   await Promise.all(workers);
+
+  // 清理订阅代理
+  if (proxyConfigData.mode === 'subscription') {
+    await proxyManager.stopAllSubscriptionProxies();
+    proxyManager.disconnectNativeHost();
+  }
 
   // 完成
   isRunning = false;
@@ -1029,6 +1070,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         proxyAddress: message.proxyAddress,
         proxyApiUrl: message.proxyApiUrl,
         proxyPool: message.proxyPool,
+        proxySubscriptionUrl: message.proxySubscriptionUrl,
       }).then(sendResponse);
       return true;
 
@@ -1167,6 +1209,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         .then(r => r.text())
         .then(css => sendResponse({ css }))
         .catch(e => sendResponse({ error: e.message }));
+      return true;
+
+    case 'CHECK_XRAY':
+      // 检查 xray-core 是否可用
+      proxyManager.checkXrayAvailable()
+        .then(available => sendResponse({ success: true, available }))
+        .catch(e => sendResponse({ success: false, error: e.message }));
+      return true;
+
+    case 'FETCH_SUBSCRIPTION':
+      // 预览订阅节点列表
+      (async () => {
+        try {
+          const nodes = await fetchSubscription(message.url);
+          subscriptionNodes = nodes;
+          sendResponse({
+            success: true,
+            count: nodes.length,
+            nodes: nodes.map(n => ({
+              protocol: n.protocol,
+              name: n.name || `${n.host}:${n.port}`,
+              host: n.host,
+              port: n.port
+            }))
+          });
+        } catch (e) {
+          sendResponse({ success: false, error: e.message });
+        }
+      })();
       return true;
 
     default:

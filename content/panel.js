@@ -93,6 +93,7 @@
                 <option value="socks5">SOCKS5</option>
                 <option value="api">API 提取</option>
                 <option value="pool">代理池</option>
+                <option value="subscription">订阅</option>
               </select>
             </div>
             <div id="proxy-manual-config" class="proxy-config-panel" style="display:none">
@@ -127,6 +128,13 @@
             <div id="proxy-pool-config" class="proxy-config-panel" style="display:none">
               <textarea id="proxy-pool-list" class="proxy-pool-textarea" placeholder="每行一个 host:port:user:pass" rows="3"></textarea>
               <button id="proxy-pool-save-btn" class="btn-small" style="margin-top:6px">保存</button>
+            </div>
+            <div id="proxy-subscription-config" class="proxy-config-panel" style="display:none">
+              <div class="gmail-input-row">
+                <input type="url" id="proxy-subscription-url" placeholder="订阅链接 (vless/hy2/vmess/trojan/ss)" class="gmail-input">
+                <button id="proxy-subscription-fetch-btn" class="btn-small btn-small-primary">提取</button>
+              </div>
+              <p id="proxy-subscription-info" class="gmail-hint" style="display:none"></p>
             </div>
             <p class="proxy-status" id="proxy-status"></p>
           </div>
@@ -367,6 +375,10 @@
   const socks5UsernameInput = $('#socks5-username');
   const socks5PasswordInput = $('#socks5-password');
   const socks5SaveBtn = $('#socks5-save-btn');
+  const proxySubscriptionConfig = $('#proxy-subscription-config');
+  const proxySubscriptionUrlInput = $('#proxy-subscription-url');
+  const proxySubscriptionFetchBtn = $('#proxy-subscription-fetch-btn');
+  const proxySubscriptionInfo = $('#proxy-subscription-info');
   // ============== 状态变量 ==============
 
   let gmailAddress = '';
@@ -616,6 +628,7 @@
         proxyAddress: proxyConfig.address,
         proxyApiUrl: proxyConfig.apiUrl,
         proxyPool: proxyConfig.pool,
+        proxySubscriptionUrl: proxyConfig.subscriptionUrl || '',
       });
       if (response.state) updateUI(response.state);
     } catch (error) {
@@ -795,6 +808,7 @@
     proxySocks5Config.style.display = mode === 'socks5' ? 'block' : 'none';
     proxyApiConfig.style.display = mode === 'api' ? 'block' : 'none';
     proxyPoolConfig.style.display = mode === 'pool' ? 'block' : 'none';
+    proxySubscriptionConfig.style.display = mode === 'subscription' ? 'block' : 'none';
   }
 
   async function loadProxyConfig() {
@@ -807,6 +821,10 @@
         proxyApiUrlInput.value = proxyConfig.apiUrl || '';
         proxyPoolList.value = proxyConfig.pool || '';
         switchProxyMode(proxyConfig.mode);
+        // 回填订阅链接
+        if (proxyConfig.subscriptionUrl) {
+          proxySubscriptionUrlInput.value = proxyConfig.subscriptionUrl;
+        }
         // 回填 socks5 字段
         if (proxyConfig.mode === 'socks5' && proxyConfig.address) {
           try {
@@ -841,6 +859,7 @@
     }
     else if (mode === 'api') proxyConfig.apiUrl = proxyApiUrlInput.value.trim();
     else if (mode === 'pool') proxyConfig.pool = proxyPoolList.value.trim();
+    else if (mode === 'subscription') proxyConfig.subscriptionUrl = proxySubscriptionUrlInput.value.trim();
     try {
       await chrome.storage.local.set({ proxyConfig });
       updateProxyStatus(true);
@@ -881,9 +900,38 @@
     }
   }
 
+  async function fetchSubscriptionNodes() {
+    const url = proxySubscriptionUrlInput.value.trim();
+    if (!url) { proxyStatus.textContent = '请输入订阅链接'; proxyStatus.classList.add('error'); return; }
+
+    proxySubscriptionFetchBtn.disabled = true;
+    proxySubscriptionFetchBtn.textContent = '提取中...';
+    proxySubscriptionInfo.style.display = 'none';
+
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'FETCH_SUBSCRIPTION', url });
+      if (!response.success) throw new Error(response.error);
+
+      proxyConfig.subscriptionUrl = url;
+      proxyConfig.mode = 'subscription';
+      await chrome.storage.local.set({ proxyConfig });
+
+      proxySubscriptionInfo.textContent = `✓ 已提取 ${response.count} 个节点`;
+      proxySubscriptionInfo.style.display = 'block';
+      proxyStatus.textContent = `✓ 订阅: ${response.count} 个节点`;
+      proxyStatus.classList.remove('error');
+    } catch (error) {
+      proxyStatus.textContent = '订阅提取失败: ' + error.message;
+      proxyStatus.classList.add('error');
+    } finally {
+      proxySubscriptionFetchBtn.disabled = false;
+      proxySubscriptionFetchBtn.textContent = '提取';
+    }
+  }
+
   function updateProxyStatus(saved) {
     if (!saved || proxyConfig.mode === 'none') { proxyStatus.textContent = ''; return; }
-    const labels = { manual: '手动代理', socks5: 'SOCKS5', api: 'API 提取', pool: '代理池' };
+    const labels = { manual: '手动代理', socks5: 'SOCKS5', api: 'API 提取', pool: '代理池', subscription: '订阅' };
     proxyStatus.textContent = `✓ 模式: ${labels[proxyConfig.mode] || proxyConfig.mode}`;
     proxyStatus.classList.remove('error');
   }
@@ -994,6 +1042,7 @@
     proxySaveBtn.addEventListener('click', saveProxyConfig);
     proxyFetchBtn.addEventListener('click', fetchProxiesFromApi);
     proxyPoolSaveBtn.addEventListener('click', saveProxyConfig);
+    proxySubscriptionFetchBtn.addEventListener('click', fetchSubscriptionNodes);
     socks5AuthCheck.addEventListener('change', () => {
       socks5AuthFields.style.display = socks5AuthCheck.checked ? 'block' : 'none';
     });

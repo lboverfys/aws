@@ -13,7 +13,8 @@
     "proxy",
     "webRequest",
     "webRequestAuthProvider",
-    "declarativeNetRequest"
+    "declarativeNetRequest",
+    "nativeMessaging"
   ],
   "host_permissions": [
     "https://*.signin.aws/*",

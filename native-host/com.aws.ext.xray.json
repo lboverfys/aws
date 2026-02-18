@@ -1,0 +1,9 @@
+{
+  "name": "com.aws.ext.xray",
+  "description": "AWS Auto Registration - Xray Proxy Manager",
+  "path": "D:\\Happy\\AWS-BuildID-Auto-For-Ext\\native-host\\run-host.bat",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://lmabaglimnakijahfbfoccgjllddpmoo/"
+  ]
+}

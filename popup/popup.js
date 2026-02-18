@@ -68,6 +68,10 @@ const proxyFetchBtn = document.getElementById('proxy-fetch-btn');
 const proxyPoolList = document.getElementById('proxy-pool-list');
 const proxyPoolSaveBtn = document.getElementById('proxy-pool-save-btn');
 const proxyStatus = document.getElementById('proxy-status');
+const proxySubscriptionConfig = document.getElementById('proxy-subscription-config');
+const proxySubscriptionUrlInput = document.getElementById('proxy-subscription-url');
+const proxySubscriptionFetchBtn = document.getElementById('proxy-subscription-fetch-btn');
+const proxySubscriptionInfo = document.getElementById('proxy-subscription-info');
 
 // Token Pool 元素
 const poolApiKeyInput = document.getElementById('pool-api-key');
@@ -482,6 +486,7 @@ async function startRegistration() {
       proxyAddress: proxyConfig.address,
       proxyApiUrl: proxyConfig.apiUrl,
       proxyPool: proxyConfig.pool,
+      proxySubscriptionUrl: proxyConfig.subscriptionUrl || '',
     });
     _log('[Popup] 注册响应:', response);
 
@@ -796,6 +801,7 @@ function switchProxyMode(mode) {
   proxyManualConfig.style.display = mode === 'manual' ? 'block' : 'none';
   proxyApiConfig.style.display = mode === 'api' ? 'block' : 'none';
   proxyPoolConfig.style.display = mode === 'pool' ? 'block' : 'none';
+  proxySubscriptionConfig.style.display = mode === 'subscription' ? 'block' : 'none';
 }
 
 /**
@@ -810,6 +816,9 @@ async function loadProxyConfig() {
       proxyAddressInput.value = proxyConfig.address || '';
       proxyApiUrlInput.value = proxyConfig.apiUrl || '';
       proxyPoolList.value = proxyConfig.pool || '';
+      if (proxyConfig.subscriptionUrl) {
+        proxySubscriptionUrlInput.value = proxyConfig.subscriptionUrl;
+      }
       switchProxyMode(proxyConfig.mode);
       if (proxyConfig.mode !== 'none') {
         updateProxyStatus(true);
@@ -833,6 +842,8 @@ async function saveProxyConfig() {
     proxyConfig.apiUrl = proxyApiUrlInput.value.trim();
   } else if (mode === 'pool') {
     proxyConfig.pool = proxyPoolList.value.trim();
+  } else if (mode === 'subscription') {
+    proxyConfig.subscriptionUrl = proxySubscriptionUrlInput.value.trim();
   }
 
   try {
@@ -897,9 +908,51 @@ function updateProxyStatus(saved) {
     proxyStatus.textContent = '';
     return;
   }
-  const modeLabels = { manual: '手动代理', api: 'API 提取', pool: '代理池' };
+  const modeLabels = { manual: '手动代理', api: 'API 提取', pool: '代理池', subscription: '订阅' };
   proxyStatus.textContent = `✓ 模式: ${modeLabels[proxyConfig.mode] || proxyConfig.mode}`;
   proxyStatus.classList.remove('error');
+}
+
+/**
+ * 提取订阅节点
+ */
+async function fetchSubscriptionNodes() {
+  const url = proxySubscriptionUrlInput.value.trim();
+  if (!url) {
+    proxyStatus.textContent = '请输入订阅链接';
+    proxyStatus.classList.add('error');
+    return;
+  }
+
+  proxySubscriptionFetchBtn.disabled = true;
+  proxySubscriptionFetchBtn.textContent = '提取中...';
+  proxySubscriptionInfo.style.display = 'none';
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'FETCH_SUBSCRIPTION',
+      url
+    });
+
+    if (!response.success) {
+      throw new Error(response.error);
+    }
+
+    proxyConfig.subscriptionUrl = url;
+    proxyConfig.mode = 'subscription';
+    await chrome.storage.local.set({ proxyConfig });
+
+    proxySubscriptionInfo.textContent = `✓ 已提取 ${response.count} 个节点`;
+    proxySubscriptionInfo.style.display = 'block';
+    proxyStatus.textContent = `✓ 订阅: ${response.count} 个节点`;
+    proxyStatus.classList.remove('error');
+  } catch (error) {
+    proxyStatus.textContent = '订阅提取失败: ' + error.message;
+    proxyStatus.classList.add('error');
+  } finally {
+    proxySubscriptionFetchBtn.disabled = false;
+    proxySubscriptionFetchBtn.textContent = '提取';
+  }
 }
 
 // ==================== Gmail 配置功能 ====================
@@ -1206,6 +1259,7 @@ async function init() {
   proxySaveBtn.addEventListener('click', saveProxyConfig);
   proxyFetchBtn.addEventListener('click', fetchProxiesFromApi);
   proxyPoolSaveBtn.addEventListener('click', saveProxyConfig);
+  proxySubscriptionFetchBtn.addEventListener('click', fetchSubscriptionNodes);
 
   // Token Pool 事件
   poolConnectBtn.addEventListener('click', connectToPool);

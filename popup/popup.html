@@ -86,6 +86,7 @@
           <option value="manual">手动配置</option>
           <option value="api">API 提取</option>
           <option value="pool">代理池</option>
+          <option value="subscription">订阅</option>
         </select>
       </div>
 
@@ -109,6 +110,15 @@
       <div id="proxy-pool-config" class="proxy-config-panel" style="display:none">
         <textarea id="proxy-pool-list" class="proxy-pool-textarea" placeholder="每行一个 host:port:user:pass" rows="4"></textarea>
         <button id="proxy-pool-save-btn" class="btn-small" style="margin-top:6px">保存</button>
+      </div>
+
+      <!-- 订阅模式 -->
+      <div id="proxy-subscription-config" class="proxy-config-panel" style="display:none">
+        <div class="gmail-input-row">
+          <input type="url" id="proxy-subscription-url" placeholder="订阅链接 (vless/hy2/vmess/trojan/ss)" class="gmail-input">
+          <button id="proxy-subscription-fetch-btn" class="btn-small btn-small-primary">提取</button>
+        </div>
+        <p id="proxy-subscription-info" class="gmail-hint" style="display:none"></p>
       </div>
 
       <p class="proxy-status" id="proxy-status"></p>
