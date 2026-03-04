@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -41,25 +41,9 @@
       <div class="section-header">
         <h2>邮箱配置</h2>
       </div>
-      <div class="mail-provider-select">
-        <select id="mail-provider" class="provider-select">
-          <option value="gmail">Gmail 别名</option>
-          <option value="moemail">MoeMail</option>
-        </select>
-      </div>
-
-      <!-- Gmail 配置 -->
-      <div id="gmail-config" class="gmail-config">
-        <div class="gmail-input-row">
-          <input type="email" id="gmail-address" placeholder="输入你的 Gmail 地址" class="gmail-input">
-          <button id="gmail-save-btn" class="btn-small">保存</button>
-        </div>
-        <p class="gmail-hint">自动生成别名变体（+号/点号/大小写），验证码需手动填写</p>
-        <p class="gmail-status" id="gmail-status"></p>
-      </div>
 
       <!-- MoeMail 配置 -->
-      <div id="moemail-config" class="gmail-config" style="display:none">
+      <div id="moemail-config" class="gmail-config">
         <div class="gmail-input-row">
           <input type="url" id="moemail-api-url" placeholder="MoeMail API 地址 (https://...)" class="gmail-input">
         </div>
@@ -145,7 +129,7 @@
           <input type="number" id="concurrency" min="1" max="3" value="1" class="setting-input">
         </div>
       </div>
-      <p class="settings-hint">⚠️ Gmail 别名模式建议并发设为 1；MoeMail 模式支持多并发</p>
+      <p class="settings-hint">⚠️ 建议并发设为 1，多窗口容易出现会话混淆</p>
     </div>
 
     <!-- 操作按钮区域 -->

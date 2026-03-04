@@ -3,7 +3,6 @@
  * 管理注册状态和流程控制，支持多窗口并发注册
  */
 
-import { GmailAliasClient } from '../lib/mail-api.js';
 import { MoeMailClient } from '../lib/moemail-api.js';
 import { AWSDeviceAuth, validateToken, refreshAndValidateToken, resetSessionUA } from '../lib/oidc-api.js';
 import { generatePassword, generateName, generateEmailPrefix } from '../lib/utils.js';
@@ -39,9 +38,6 @@ function deobfuscate(encoded) {
 // ============== 代理锁 ==============
 let proxyLock = Promise.resolve();
 
-// Gmail 配置
-let gmailBaseAddress = '';
-
 // MoeMail 配置
 let moemailConfig = { apiUrl: '', apiKey: '', domain: '' };
 
@@ -52,7 +48,7 @@ let proxyConfigData = { mode: 'none', address: '', apiUrl: '', pool: '' };
 let subscriptionNodes = [];
 
 // 邮箱渠道
-let mailProvider = 'gmail';
+let mailProvider = 'moemail';
 
 // 代理管理器
 const proxyManager = new ProxyManager();
@@ -214,7 +210,7 @@ function createSession() {
     // 邮箱客户端
     mailClient: null,
     mailAccessKey: null,
-    manualVerification: true, // true=Gmail(手动), false=MoeMail(自动)
+    manualVerification: false, // MoeMail 自动获取验证码
     // OIDC 客户端
     oidcClient: null,
     oidcAuth: null,
@@ -248,8 +244,7 @@ async function destroySession(sessionId) {
     }
   }
 
-  // Gmail 别名模式不需要删除邮箱
-  // MoeMail 模式需要清理临时邮箱
+  // MoeMail 模式清理临时邮箱
   if (session.mailClient && session.mailClient instanceof MoeMailClient) {
     try {
       await session.mailClient.deleteInbox();
@@ -381,35 +376,19 @@ async function runSessionRegistration(session) {
     // 步骤 3: 生成邮箱（代理已生效，邮箱 API 请求也走代理）
     updateSession(session.id, { step: '生成邮箱...' });
 
-    if (mailProvider === 'moemail') {
-      // MoeMail 模式：创建临时邮箱
-      if (!moemailConfig.apiUrl || !moemailConfig.apiKey) {
-        throw new Error('未配置 MoeMail，请在插件设置中配置 API 地址和 Key');
-      }
-      session.mailClient = new MoeMailClient({
-        apiUrl: moemailConfig.apiUrl,
-        apiKey: moemailConfig.apiKey,
-        domain: moemailConfig.domain,
-      });
-      const email = await session.mailClient.createInbox();
-      session.email = email;
-      session.manualVerification = false; // MoeMail 自动获取验证码
-      updateSession(session.id, { email });
-    } else {
-      // Gmail 别名模式
-      if (!gmailBaseAddress) {
-        throw new Error('未配置 Gmail 地址，请在插件设置中配置');
-      }
-      session.mailClient = new GmailAliasClient({ baseEmail: gmailBaseAddress });
-      const nameSuffix = `${firstName.toLowerCase()}${lastName.toLowerCase()}`.slice(0, 8);
-      const email = await session.mailClient.createInbox({
-        prefix: nameSuffix,
-        mode: 'auto'
-      });
-      session.email = email;
-      session.manualVerification = true; // Gmail 需要手动输入验证码
-      updateSession(session.id, { email });
+    // MoeMail 模式：创建临时邮箱
+    if (!moemailConfig.apiUrl || !moemailConfig.apiKey) {
+      throw new Error('未配置 MoeMail，请在插件设置中配置 API 地址和 Key');
     }
+    session.mailClient = new MoeMailClient({
+      apiUrl: moemailConfig.apiUrl,
+      apiKey: moemailConfig.apiKey,
+      domain: moemailConfig.domain,
+    });
+    const email = await session.mailClient.createInbox();
+    session.email = email;
+    session.manualVerification = false; // MoeMail 自动获取验证码
+    updateSession(session.id, { email });
 
     log(`[Session ${session.id}] 账号信息:`, { email: session.email, firstName, lastName });
 
@@ -813,13 +792,13 @@ async function validateAllTokens() {
 /**
  * 开始批量注册
  */
-async function startBatchRegistration(loopCount, concurrency, gmailAddress, options = {}) {
+async function startBatchRegistration(loopCount, concurrency, options = {}) {
   if (isRunning) {
     return { success: false, error: '已有注册任务在运行' };
   }
 
   // 设置邮箱渠道
-  mailProvider = options.mailProvider || 'gmail';
+  mailProvider = 'moemail';
 
   // 使用代理时强制并发为 1，因为 chrome.proxy.settings 是全局的，
   // 并发会导致多个会话互相覆盖代理设置，造成 IP/指纹不匹配
@@ -829,21 +808,14 @@ async function startBatchRegistration(loopCount, concurrency, gmailAddress, opti
     concurrency = 1;
   }
 
-  if (mailProvider === 'gmail') {
-    if (!gmailAddress) {
-      return { success: false, error: '未配置 Gmail 地址' };
-    }
-    gmailBaseAddress = gmailAddress;
-  } else if (mailProvider === 'moemail') {
-    if (!options.moemailApiUrl || !options.moemailApiKey) {
-      return { success: false, error: '未配置 MoeMail API 地址或 Key' };
-    }
-    moemailConfig = {
-      apiUrl: options.moemailApiUrl,
-      apiKey: options.moemailApiKey,
-      domain: options.moemailDomain || '',
-    };
+  if (!options.moemailApiUrl || !options.moemailApiKey) {
+    return { success: false, error: '未配置 MoeMail API 地址或 Key' };
   }
+  moemailConfig = {
+    apiUrl: options.moemailApiUrl,
+    apiKey: options.moemailApiKey,
+    domain: options.moemailDomain || '',
+  };
 
   // 设置代理配置
   proxyConfigData = {
@@ -976,7 +948,7 @@ async function runWorker(workerId) {
 
     // 任务间延迟（随机化，避免固定节奏）
     if (!shouldStop && taskQueue.length > 0) {
-      await new Promise(resolve => setTimeout(resolve, 8000 + Math.random() * 7000));
+      await new Promise(resolve => setTimeout(resolve, 15000 + Math.random() * 15000));
     }
   }
 
@@ -1039,47 +1011,31 @@ function findSessionByWindowId(windowId) {
 }
 
 /**
- * 获取验证码
- * MoeMail 模式：自动从 API 获取
- * Gmail 模式：等待用户手动输入
+ * 获取验证码（MoeMail 自动获取）
  */
 async function getVerificationCode(session) {
   if (!session) {
     return { success: false, error: '会话未初始化' };
   }
 
-  // MoeMail 模式：自动获取验证码
-  if (!session.manualVerification && session.mailClient && session.mailClient instanceof MoeMailClient) {
-    log(`[Session ${session.id}] MoeMail 模式，自动获取验证码...`);
-    updateSession(session.id, { step: '等待验证码...' });
+  if (!session.mailClient || !(session.mailClient instanceof MoeMailClient)) {
+    return { success: false, error: 'MoeMail 客户端未初始化' };
+  }
 
-    try {
-      const code = await session.mailClient.waitForVerificationCode(120000);
-      if (code) {
-        log(`[Session ${session.id}] MoeMail 验证码: ${code}`);
-        return { success: true, code };
-      } else {
-        return { success: false, error: 'MoeMail 验证码获取超时' };
-      }
-    } catch (e) {
-      return { success: false, error: 'MoeMail 验证码获取失败: ' + e.message };
+  log(`[Session ${session.id}] MoeMail 模式，自动获取验证码...`);
+  updateSession(session.id, { step: '等待验证码...' });
+
+  try {
+    const code = await session.mailClient.waitForVerificationCode(120000);
+    if (code) {
+      log(`[Session ${session.id}] MoeMail 验证码: ${code}`);
+      return { success: true, code };
+    } else {
+      return { success: false, error: 'MoeMail 验证码获取超时' };
     }
+  } catch (e) {
+    return { success: false, error: 'MoeMail 验证码获取失败: ' + e.message };
   }
-
-  // Gmail 别名模式下，需要用户手动输入验证码
-  log(`[Session ${session.id}] Gmail 别名模式，等待用户手动输入验证码`);
-
-  // 如果会话中已经有验证码（用户已输入），则返回
-  if (session.verificationCode) {
-    return { success: true, code: session.verificationCode };
-  }
-
-  // 返回需要手动输入的标记
-  return {
-    success: false,
-    needManualInput: true,
-    error: '请从 Gmail 收件箱获取验证码并手动填写'
-  };
 }
 
 /**
@@ -1104,8 +1060,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case 'START_BATCH_REGISTRATION':
-      startBatchRegistration(message.loopCount || 1, message.concurrency || 1, message.gmailAddress, {
-        mailProvider: message.mailProvider,
+      startBatchRegistration(message.loopCount || 1, message.concurrency || 1, {
         moemailApiUrl: message.moemailApiUrl,
         moemailApiKey: message.moemailApiKey,
         moemailDomain: message.moemailDomain,

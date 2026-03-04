@@ -114,7 +114,7 @@ export function applyFingerprint(config) {
             result.platform = 'Windows';
             result.platformVersion = fakePlatformVersion;
             result.uaFullVersion = chromeVer;
-            result.architecture = 'x86';
+            result.architecture = 'x64';
             result.model = '';
             result.bitness = '64';
             if (result.fullVersionList) {

@@ -318,27 +318,33 @@
   }
 
   /**
-   * 获取验证码（Gmail 别名模式 - 等待用户手动输入）
+   * 获取验证码（MoeMail 自动获取）
    */
   async function getVerificationCode() {
     if (verificationCode) {
       return verificationCode;
     }
 
-    updateStep('请手动填写验证码（从 Gmail 收件箱获取）');
+    updateStep('正在获取验证码...');
 
     try {
       const response = await chrome.runtime.sendMessage({ type: 'GET_VERIFICATION_CODE' });
+      console.log('[Content] GET_VERIFICATION_CODE 响应:', response);
+
       if (response && response.success) {
         verificationCode = response.code;
         return verificationCode;
       }
 
-      // Gmail 别名模式，需要用户手动输入
-      if (response && response.needManualInput) {
-        return null; // 返回 null 表示需要手动输入
+      // MoeMail 模式超时或失败，返回 'retry' 标记以便重试
+      if (response && !response.success) {
+        console.warn('[Content] 验证码获取失败:', response.error);
+        return 'retry';
       }
-    } catch (_) {}
+    } catch (e) {
+      console.error('[Content] GET_VERIFICATION_CODE 异常:', e);
+      return 'retry';
+    }
     return null;
   }
 
@@ -402,7 +408,7 @@
 
       // 每个字符之间随机间隔（模拟真实打字速度，偶尔有停顿）
       if (i < text.length - 1) {
-        const pause = Math.random() < 0.08 ? 200 + Math.random() * 400 : 30 + Math.random() * 90;
+        const pause = Math.random() < 0.12 ? 250 + Math.random() * 450 : 45 + Math.random() * 100;
         await randomDelay(pause * 0.8, pause * 1.2);
       }
     }
@@ -558,7 +564,7 @@
     }
 
     await humanFill(emailInput, info.email);
-    await randomDelay(300, 700);
+    await randomDelay(500, 1200);
 
     updateStep('点击继续...');
     const btn = $('button[data-testid="test-primary-button"], button[type="submit"], button.awsui-button-variant-primary');
@@ -592,7 +598,7 @@
     }
 
     await humanFill(nameInput, info.fullName);
-    await randomDelay(300, 700);
+    await randomDelay(500, 1200);
 
     updateStep('点击继续...');
     const btn = $('button[data-testid="signup-next-button"], button[type="submit"], button.awsui-button-variant-primary');
@@ -602,34 +608,34 @@
   }
 
   /**
-   * 处理验证码页（Gmail 别名模式 - 用户手动输入）
+   * 处理验证码页（MoeMail 自动获取并填写）
    */
   async function handleVerifyPage() {
-    updateStep('请手动填写验证码');
+    updateStep('正在获取验证码...');
 
     const code = await getVerificationCode();
-    
-    // Gmail 别名模式下，code 为 null，需要用户手动输入
-    if (!code) {
-      // 显示提示，等待用户手动输入
-      updateStep('📧 请从 Gmail 收件箱获取验证码并手动填写');
-      
-      // 不自动填写，让用户手动输入
-      // 但仍然标记这个页面已经被处理过（避免重复提示）
-      // 返回 true 表示已处理（提示用户），避免重复处理
-      // 用户手动填写后会自动点击按钮或按 Enter
-      return true;
+
+    // MoeMail 模式失败，返回 false 以便 processPage 不标记为已处理，下次轮询重试
+    if (code === 'retry') {
+      updateStep('验证码获取失败，等待重试...');
+      return false;
     }
 
-    // 如果有验证码（从其他来源获取），则自动填写
+    if (!code) {
+      updateStep('验证码获取失败');
+      return false;
+    }
+
+    // 自动填写验证码
     updateStep(`填写验证码: ${code}`);
-    const codeInput = $('input[placeholder*="位数"], input[placeholder*="digit" i], input[type="text"][maxlength="6"], input[name="code"], input[name="otp"]');
+    const codeInput = $('input[placeholder*="位数"], input[placeholder*="digit" i], input[placeholder*="stellig" i], input[placeholder*="chiffre" i], input[placeholder*="dígito" i], input[placeholder*="桁" i], input[id^="formField"][class*="awsui_input"], input[type="text"][maxlength="6"], input[name="code"], input[name="otp"]');
     if (!codeInput) {
+      console.warn('[Content] 找不到验证码输入框');
       return false;
     }
 
     await humanFill(codeInput, code);
-    await randomDelay(300, 700);
+    await randomDelay(500, 1200);
 
     updateStep('点击验证...');
     const btn = $('button[data-testid="email-verification-verify-button"], button[type="submit"], button.awsui-button-variant-primary');
@@ -679,7 +685,7 @@
       await humanFill(confirmInput, info.password);
     }
 
-    await randomDelay(300, 700);
+    await randomDelay(500, 1200);
 
     updateStep('点击继续...');
     const btn = $('button[data-testid="test-primary-button"], button[type="submit"], button.awsui-button-variant-primary');

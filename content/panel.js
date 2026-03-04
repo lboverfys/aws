@@ -53,21 +53,7 @@
           <!-- 邮箱配置 -->
           <div id="gmail-section" class="section gmail-section">
             <div class="section-header"><h2>邮箱配置</h2></div>
-            <div class="mail-provider-select">
-              <select id="mail-provider" class="provider-select">
-                <option value="gmail">Gmail 别名</option>
-                <option value="moemail">MoeMail</option>
-              </select>
-            </div>
-            <div id="gmail-config" class="gmail-config">
-              <div class="gmail-input-row">
-                <input type="email" id="gmail-address" placeholder="输入你的 Gmail 地址" class="gmail-input">
-                <button id="gmail-save-btn" class="btn-small">保存</button>
-              </div>
-              <p class="gmail-hint">自动生成别名变体，验证码需手动填写</p>
-              <p class="gmail-status" id="gmail-status"></p>
-            </div>
-            <div id="moemail-config" class="gmail-config" style="display:none">
+            <div id="moemail-config" class="gmail-config">
               <div class="gmail-input-row">
                 <input type="url" id="moemail-api-url" placeholder="MoeMail API 地址 (https://...)" class="gmail-input">
               </div>
@@ -151,7 +137,7 @@
                 <input type="number" id="concurrency" min="1" max="3" value="1" class="setting-input">
               </div>
             </div>
-            <p class="settings-hint">Gmail 建议并发 1；MoeMail 支持多并发</p>
+            <p class="settings-hint">建议并发设为 1，多窗口容易会话混淆</p>
           </div>
 
           <div id="action-section" class="section">
@@ -345,11 +331,6 @@
   const validateBtn = $('#validate-btn');
   const validateSection = $('#validate-section');
   const validateText = $('#validate-text');
-  const gmailAddressInput = $('#gmail-address');
-  const gmailSaveBtn = $('#gmail-save-btn');
-  const gmailStatus = $('#gmail-status');
-  const mailProviderSelect = $('#mail-provider');
-  const gmailConfigDiv = $('#gmail-config');
   const moemailConfigDiv = $('#moemail-config');
   const moemailApiUrlInput = $('#moemail-api-url');
   const moemailApiKeyInput = $('#moemail-api-key');
@@ -381,7 +362,6 @@
   const proxySubscriptionInfo = $('#proxy-subscription-info');
   // ============== 状态变量 ==============
 
-  let gmailAddress = '';
   let moemailConfig = { apiUrl: '', apiKey: '', domain: '' };
   let proxyConfig = { mode: 'none', address: '', apiUrl: '', pool: '' };
 
@@ -599,19 +579,14 @@
   async function startRegistration() {
     const loopCount = parseInt(loopCountInput.value) || 1;
     const concurrency = parseInt(concurrencyInput.value) || 1;
-    const mailProv = mailProviderSelect.value;
 
-    if (mailProv === 'gmail') {
-      if (!gmailAddress) { await showAlert('请先配置 Gmail 地址'); gmailAddressInput.focus(); return; }
-    } else if (mailProv === 'moemail') {
-      if (!moemailConfig.apiUrl || !moemailConfig.apiKey) { await showAlert('请先配置 MoeMail API 地址和 API Key'); moemailApiUrlInput.focus(); return; }
-    }
+    if (!moemailConfig.apiUrl || !moemailConfig.apiKey) { await showAlert('请先配置 MoeMail API 地址和 API Key'); moemailApiUrlInput.focus(); return; }
 
     if (loopCount < 1 || loopCount > 100) { await showAlert('注册数量需在 1-100 之间'); return; }
     if (concurrency < 1 || concurrency > 3) { await showAlert('并发窗口需在 1-3 之间'); return; }
 
-    if (mailProv === 'gmail' && concurrency > 1) {
-      const ok = await showConfirm('使用 Gmail 别名模式时，建议并发设为 1（需要手动输入验证码）。\n\n是否继续？');
+    if (concurrency > 1) {
+      const ok = await showConfirm('建议并发设为 1，多窗口容易出现会话混淆。\n\n是否继续？');
       if (!ok) return;
     }
 
@@ -619,8 +594,8 @@
     try {
       const response = await chrome.runtime.sendMessage({
         type: 'START_BATCH_REGISTRATION',
-        loopCount, concurrency, gmailAddress,
-        mailProvider: mailProv,
+        loopCount, concurrency,
+        mailProvider: 'moemail',
         moemailApiUrl: moemailConfig.apiUrl,
         moemailApiKey: moemailConfig.apiKey,
         moemailDomain: moemailConfig.domain,
@@ -757,26 +732,17 @@
     }
   }
 
-  // ============== 邮箱渠道 ==============
-
-  function switchMailProvider(provider) {
-    gmailConfigDiv.style.display = provider === 'gmail' ? 'block' : 'none';
-    moemailConfigDiv.style.display = provider === 'moemail' ? 'block' : 'none';
-  }
+  // ============== MoeMail 配置 ==============
 
   async function loadMoemailConfig() {
     try {
-      const result = await chrome.storage.local.get(['moemailConfig', 'mailProvider']);
+      const result = await chrome.storage.local.get(['moemailConfig']);
       if (result.moemailConfig) {
         moemailConfig = result.moemailConfig;
         moemailApiUrlInput.value = moemailConfig.apiUrl || '';
         moemailApiKeyInput.value = moemailConfig.apiKey || '';
         moemailDomainInput.value = moemailConfig.domain || '';
         if (moemailConfig.apiUrl && moemailConfig.apiKey) updateMoemailStatus(true);
-      }
-      if (result.mailProvider) {
-        mailProviderSelect.value = result.mailProvider;
-        switchMailProvider(result.mailProvider);
       }
     } catch (error) { _err('[MoeMail] 加载配置错误:', error); }
   }
@@ -936,37 +902,6 @@
     proxyStatus.classList.remove('error');
   }
 
-  // ============== Gmail 配置 ==============
-
-  async function loadGmailConfig() {
-    try {
-      const result = await chrome.storage.local.get(['gmailAddress']);
-      if (result.gmailAddress) {
-        gmailAddress = result.gmailAddress;
-        gmailAddressInput.value = gmailAddress;
-        updateGmailStatus(true);
-      }
-    } catch (error) { _err('[Gmail] 加载配置错误:', error); }
-  }
-
-  async function saveGmailConfig() {
-    const email = gmailAddressInput.value.trim();
-    if (!email) { gmailStatus.textContent = '请输入邮箱地址'; gmailStatus.classList.add('error'); return; }
-    if (!email.includes('@')) { gmailStatus.textContent = '邮箱格式无效'; gmailStatus.classList.add('error'); return; }
-    try {
-      gmailAddress = email;
-      await chrome.storage.local.set({ gmailAddress: email });
-      updateGmailStatus(true);
-    } catch (error) { gmailStatus.textContent = '保存失败: ' + error.message; gmailStatus.classList.add('error'); }
-  }
-
-  function updateGmailStatus(saved) {
-    if (saved && gmailAddress) {
-      gmailStatus.textContent = `✓ 已配置: ${gmailAddress}`;
-      gmailStatus.classList.remove('error');
-    } else { gmailStatus.textContent = ''; gmailStatus.classList.remove('error'); }
-  }
-
   // ============== 面板显示/隐藏 ==============
 
   function showPanel() { backdrop.style.display = 'flex'; }
@@ -1010,7 +945,6 @@
       if (response?.state) updateUI(response.state);
     } catch (error) { _err('[Panel] 获取状态错误:', error); }
 
-    await loadGmailConfig();
     await loadMoemailConfig();
     await loadProxyConfig();
 
@@ -1022,14 +956,6 @@
     exportCsvBtn.addEventListener('click', exportHistoryCSV);
     clearBtn.addEventListener('click', clearHistory);
     validateBtn.addEventListener('click', validateAllTokens);
-
-    gmailSaveBtn.addEventListener('click', saveGmailConfig);
-    gmailAddressInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') saveGmailConfig(); });
-
-    mailProviderSelect.addEventListener('change', (e) => {
-      switchMailProvider(e.target.value);
-      chrome.storage.local.set({ mailProvider: e.target.value });
-    });
 
     moemailSaveBtn.addEventListener('click', saveMoemailConfig);
 
