@@ -156,9 +156,10 @@ function getPublicState() {
     status: globalState.status,
     step: globalState.step,
     error: globalState.error,
-    totalTarget: globalState.totalTarget,
+    totalTarget: globalState.totalTarget === Infinity ? 0 : globalState.totalTarget,
     totalRegistered: globalState.totalRegistered,
     totalFailed: globalState.totalFailed,
+    infiniteMode: globalState.infiniteMode || false,
     lastSuccess: globalState.lastSuccess,
     sessions: Array.from(sessions.values()).map(s => ({
       id: s.id,
@@ -855,33 +856,39 @@ async function startBatchRegistration(loopCount, concurrency, options = {}) {
   isRunning = true;
   shouldStop = false;
 
+  // loopCount = 0 表示无限循环，直到手动停止
+  const infiniteMode = loopCount === 0;
+
   // 重置状态
   globalState = {
     status: 'running',
     step: '开始注册...',
     error: null,
-    totalTarget: loopCount,
+    totalTarget: infiniteMode ? Infinity : loopCount,
     totalRegistered: 0,
     totalFailed: 0,
     concurrency: concurrency,
-    lastSuccess: null
+    lastSuccess: null,
+    infiniteMode: infiniteMode,
   };
 
   sessions.clear();
   broadcastState();
 
-  log(`[Service Worker] 开始批量注册: 目标=${loopCount}, 并发=${concurrency}, 邮箱渠道=${mailProvider}, 代理=${proxyConfigData.mode}`);
+  log(`[Service Worker] 开始批量注册: 目标=${infiniteMode ? '无限' : loopCount}, 并发=${concurrency}, 邮箱渠道=${mailProvider}, 代理=${proxyConfigData.mode}`);
 
-  // 创建任务队列
+  // 创建任务队列（无限模式不预填队列，由 worker 自行循环）
   taskQueue = [];
-  for (let i = 0; i < loopCount; i++) {
-    taskQueue.push(i);
+  if (!infiniteMode) {
+    for (let i = 0; i < loopCount; i++) {
+      taskQueue.push(i);
+    }
   }
 
   // 并发执行
   const workers = [];
   for (let i = 0; i < concurrency; i++) {
-    workers.push(runWorker(i));
+    workers.push(runWorker(i, infiniteMode));
   }
 
   await Promise.all(workers);
@@ -897,7 +904,7 @@ async function startBatchRegistration(loopCount, concurrency, options = {}) {
   globalState.status = shouldStop ? 'idle' : 'completed';
   globalState.step = shouldStop
     ? `已停止，成功 ${globalState.totalRegistered} 个`
-    : `完成！成功 ${globalState.totalRegistered}/${loopCount} 个`;
+    : `完成！成功 ${globalState.totalRegistered}/${infiniteMode ? '∞' : loopCount} 个`;
 
   broadcastState();
 
@@ -907,8 +914,8 @@ async function startBatchRegistration(loopCount, concurrency, options = {}) {
 /**
  * 工作线程 - 从队列取任务执行
  */
-async function runWorker(workerId) {
-  log(`[Worker ${workerId}] 启动`);
+async function runWorker(workerId, infiniteMode = false) {
+  log(`[Worker ${workerId}] 启动, 无限模式=${infiniteMode}`);
 
   // 错开启动时间，避免同时创建窗口和调用 API
   // 第一个 worker 立即启动，后续 worker 等待更长时间
@@ -916,11 +923,18 @@ async function runWorker(workerId) {
     await new Promise(resolve => setTimeout(resolve, workerId * (2000 + Math.random() * 3000)));
   }
 
-  while (!shouldStop && taskQueue.length > 0) {
-    const taskIndex = taskQueue.shift();
-    if (taskIndex === undefined) break;
+  let taskCounter = 0;
 
-    log(`[Worker ${workerId}] 执行任务 #${taskIndex + 1}`);
+  while (!shouldStop) {
+    // 有限模式：从队列取任务，队列空则退出
+    if (!infiniteMode) {
+      const taskIndex = taskQueue.shift();
+      if (taskIndex === undefined) break;
+      taskCounter = taskIndex;
+    }
+
+    taskCounter++;
+    log(`[Worker ${workerId}] 执行任务 #${taskCounter}`);
 
     // 清理已完成的旧会话，只保留活跃的
     for (const [id, s] of sessions) {
@@ -933,8 +947,9 @@ async function runWorker(workerId) {
     const session = createSession();
 
     const done = globalState.totalRegistered + globalState.totalFailed;
+    const targetLabel = infiniteMode ? '∞' : globalState.totalTarget;
     updateGlobalState({
-      step: `进度 ${done}/${globalState.totalTarget}，正在注册第 ${taskIndex + 1} 个...`
+      step: `进度 ${done}/${targetLabel}，正在注册第 ${taskCounter} 个...`
     });
 
     // 执行注册
@@ -943,12 +958,13 @@ async function runWorker(workerId) {
     // 更新全局进度
     const doneAfter = globalState.totalRegistered + globalState.totalFailed;
     updateGlobalState({
-      step: `进度 ${doneAfter}/${globalState.totalTarget}`
+      step: `进度 ${doneAfter}/${targetLabel}`
     });
 
     // 任务间延迟（随机化，避免固定节奏）
-    if (!shouldStop && taskQueue.length > 0) {
-      await new Promise(resolve => setTimeout(resolve, 15000 + Math.random() * 15000));
+    const hasMore = infiniteMode ? !shouldStop : taskQueue.length > 0;
+    if (!shouldStop && hasMore) {
+      await new Promise(resolve => setTimeout(resolve, 2500 + Math.random() * 2500));
     }
   }
 
@@ -1060,7 +1076,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case 'START_BATCH_REGISTRATION':
-      startBatchRegistration(message.loopCount || 1, message.concurrency || 1, {
+      startBatchRegistration(typeof message.loopCount === 'number' ? message.loopCount : 1, message.concurrency || 1, {
         moemailApiUrl: message.moemailApiUrl,
         moemailApiKey: message.moemailApiKey,
         moemailDomain: message.moemailDomain,

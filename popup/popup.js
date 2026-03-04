@@ -427,7 +427,8 @@ async function copyToClipboard(text, button) {
  * 开始注册
  */
 async function startRegistration() {
-  const loopCount = parseInt(loopCountInput.value) || 1;
+  const parsed = parseInt(loopCountInput.value);
+  const loopCount = isNaN(parsed) ? 1 : parsed;
   const concurrency = parseInt(concurrencyInput.value) || 1;
 
   // 检查 MoeMail 配置
@@ -438,8 +439,8 @@ async function startRegistration() {
   }
 
   // 验证输入
-  if (loopCount < 1 || loopCount > 100) {
-    alert('注册数量需在 1-100 之间');
+  if (loopCount < 0 || loopCount > 100) {
+    alert('注册数量需在 0-100 之间（0 = 无限循环）');
     return;
   }
   if (concurrency < 1 || concurrency > 3) {

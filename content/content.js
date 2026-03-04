@@ -134,7 +134,10 @@
     toastContent.step.textContent = step;
 
     // 更新计数器 - 支持新的状态格式
-    if (state.totalTarget > 1) {
+    if (state.infiniteMode) {
+      toastContent.counter.style.display = 'block';
+      toastContent.counter.textContent = `已注册: ${state.totalRegistered} (无限模式)`;
+    } else if (state.totalTarget > 1) {
       toastContent.counter.style.display = 'block';
       toastContent.counter.textContent = `进度: ${state.totalRegistered}/${state.totalTarget}`;
     } else if (state.loopMode && state.loopCount > 0) {

@@ -129,8 +129,8 @@
           <div id="settings-section" class="section settings-section">
             <div class="settings-row">
               <div class="setting-item">
-                <label>注册数量</label>
-                <input type="number" id="loop-count" min="1" max="100" value="1" class="setting-input">
+                <label>注册数量 <span style="font-size:11px;color:#888">(0=无限)</span></label>
+                <input type="number" id="loop-count" min="0" max="100" value="0" class="setting-input">
               </div>
               <div class="setting-item">
                 <label>并发窗口</label>
@@ -577,12 +577,13 @@
   // ============== 注册控制 ==============
 
   async function startRegistration() {
-    const loopCount = parseInt(loopCountInput.value) || 1;
+    const parsedLoop = parseInt(loopCountInput.value);
+    const loopCount = isNaN(parsedLoop) ? 1 : parsedLoop;
     const concurrency = parseInt(concurrencyInput.value) || 1;
 
     if (!moemailConfig.apiUrl || !moemailConfig.apiKey) { await showAlert('请先配置 MoeMail API 地址和 API Key'); moemailApiUrlInput.focus(); return; }
 
-    if (loopCount < 1 || loopCount > 100) { await showAlert('注册数量需在 1-100 之间'); return; }
+    if (loopCount < 0 || loopCount > 100) { await showAlert('注册数量需在 0-100 之间（0 = 无限循环）'); return; }
     if (concurrency < 1 || concurrency > 3) { await showAlert('并发窗口需在 1-3 之间'); return; }
 
     if (concurrency > 1) {
