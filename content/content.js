@@ -492,11 +492,6 @@
       return PAGE_TYPES.VERIFY;
     }
 
-    // 姓名页
-    if (url.includes('enter-email') || url.includes('signup/enter') || url.includes('createAccount')) {
-      return PAGE_TYPES.NAME;
-    }
-
     // 密码页 — 只要有一个密码输入框即可识别，不再要求同时找到确认框
     // 通过 URL 或页面上存在多个 password 输入框来判断
     if (url.includes('password') || url.includes('setPassword') || url.includes('create-password')) {
@@ -513,16 +508,21 @@
       return PAGE_TYPES.PASSWORD;
     }
 
-    // 登录页 - 支持多种选择器
+    // 登录/邮箱页 — 优先用 DOM 检测，因为 SPA 的 URL 可能不变
+    // 有 email 输入框 → 邮箱输入步骤（LOGIN）
     const emailInput = $('input[placeholder="username@example.com"], input[name="email"], input[type="email"], input[autocomplete="username"]');
     if (emailInput) {
       return PAGE_TYPES.LOGIN;
     }
 
-    // 姓名页 - DOM 回退（URL 未匹配时，通过输入框特征检测）
-    // 此时已排除登录页（无 email 输入框），如果存在 name 输入框则为姓名页
+    // 姓名页 — 用 DOM 检测（此时已排除有 email 输入框的登录页）
     const nameInputFallback = $('input[placeholder="Maria José Silva"], input[placeholder*="name" i], input[name="name"], input[name="fullName"]');
     if (nameInputFallback) {
+      return PAGE_TYPES.NAME;
+    }
+
+    // 姓名页 — URL 回退（DOM 未渲染但 URL 已变）
+    if (url.includes('signup/enter') || url.includes('createAccount')) {
       return PAGE_TYPES.NAME;
     }
 
