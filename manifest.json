@@ -13,16 +13,17 @@
     "proxy",
     "webRequest",
     "webRequestAuthProvider",
-    "declarativeNetRequest"
+    "declarativeNetRequest",
+    "nativeMessaging",
+    "cookies"
   ],
   "host_permissions": [
     "https://*.signin.aws/*",
     "https://*.aws.amazon.com/*",
     "https://signin.aws.amazon.com/*",
     "https://*.amazonaws.com/*",
-    "https://mailfly.codeforge.top/*",
     "https://view.awsapps.com/*",
-    "http://ip-api.com/*",
+    "https://ipwho.is/*",
     "<all_urls>"
   ],
   "incognito": "spanning",

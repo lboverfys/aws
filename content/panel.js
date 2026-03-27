@@ -5,6 +5,12 @@
 (function () {
   'use strict';
 
+  // 调试开关
+  const _DEBUG = false;
+  const _log = (...a) => { if (_DEBUG) console.log(...a); };
+  const _warn = (...a) => { if (_DEBUG) console.warn(...a); };
+  const _err = (...a) => { if (_DEBUG) console.error(...a); };
+
   // 防重复注入：使用随机 data 属性，避免可预测的 ID 被页面检测
   const PANEL_ATTR = '__p' + Math.random().toString(36).slice(2, 8);
   const existing = document.querySelector(`[data-ext-panel]`);
@@ -27,7 +33,7 @@
   shadow.appendChild(style);
   chrome.runtime.sendMessage({ type: 'GET_PANEL_CSS' })
     .then(resp => { if (resp?.css) style.textContent = resp.css; })
-    .catch(e => console.warn('[Panel] CSS 加载失败:', e));
+    .catch(e => _warn('[Panel] CSS 加载失败:', e));
 
   // ============== 构建 HTML ==============
 
@@ -47,21 +53,7 @@
           <!-- 邮箱配置 -->
           <div id="gmail-section" class="section gmail-section">
             <div class="section-header"><h2>邮箱配置</h2></div>
-            <div class="mail-provider-select">
-              <select id="mail-provider" class="provider-select">
-                <option value="gmail">Gmail 别名</option>
-                <option value="moemail">MoeMail</option>
-              </select>
-            </div>
-            <div id="gmail-config" class="gmail-config">
-              <div class="gmail-input-row">
-                <input type="email" id="gmail-address" placeholder="输入你的 Gmail 地址" class="gmail-input">
-                <button id="gmail-save-btn" class="btn-small">保存</button>
-              </div>
-              <p class="gmail-hint">自动生成别名变体，验证码需手动填写</p>
-              <p class="gmail-status" id="gmail-status"></p>
-            </div>
-            <div id="moemail-config" class="gmail-config" style="display:none">
+            <div id="moemail-config" class="gmail-config">
               <div class="gmail-input-row">
                 <input type="url" id="moemail-api-url" placeholder="MoeMail API 地址 (https://...)" class="gmail-input">
               </div>
@@ -84,8 +76,10 @@
               <select id="proxy-mode" class="provider-select">
                 <option value="none">不使用代理</option>
                 <option value="manual">手动配置</option>
+                <option value="socks5">SOCKS5</option>
                 <option value="api">API 提取</option>
                 <option value="pool">代理池</option>
+                <option value="subscription">订阅</option>
               </select>
             </div>
             <div id="proxy-manual-config" class="proxy-config-panel" style="display:none">
@@ -93,6 +87,23 @@
                 <input type="text" id="proxy-address" placeholder="host:port:user:pass" class="gmail-input">
                 <button id="proxy-save-btn" class="btn-small">保存</button>
               </div>
+            </div>
+            <div id="proxy-socks5-config" class="proxy-config-panel" style="display:none">
+              <div class="gmail-input-row">
+                <input type="text" id="socks5-host" placeholder="IP 地址" class="gmail-input" style="flex:2">
+                <input type="number" id="socks5-port" placeholder="端口" class="gmail-input" style="flex:1" min="1" max="65535">
+              </div>
+              <label class="socks5-auth-row">
+                <input type="checkbox" id="socks5-auth-check">
+                <span>需要身份验证</span>
+              </label>
+              <div id="socks5-auth-fields" style="display:none">
+                <div class="gmail-input-row">
+                  <input type="text" id="socks5-username" placeholder="用户名" class="gmail-input">
+                  <input type="password" id="socks5-password" placeholder="密码" class="gmail-input">
+                </div>
+              </div>
+              <button id="socks5-save-btn" class="btn-small" style="margin-top:6px">保存</button>
             </div>
             <div id="proxy-api-config" class="proxy-config-panel" style="display:none">
               <div class="gmail-input-row">
@@ -104,6 +115,13 @@
               <textarea id="proxy-pool-list" class="proxy-pool-textarea" placeholder="每行一个 host:port:user:pass" rows="3"></textarea>
               <button id="proxy-pool-save-btn" class="btn-small" style="margin-top:6px">保存</button>
             </div>
+            <div id="proxy-subscription-config" class="proxy-config-panel" style="display:none">
+              <div class="gmail-input-row">
+                <input type="url" id="proxy-subscription-url" placeholder="订阅链接 (vless/hy2/vmess/trojan/ss)" class="gmail-input">
+                <button id="proxy-subscription-fetch-btn" class="btn-small btn-small-primary">提取</button>
+              </div>
+              <p id="proxy-subscription-info" class="gmail-hint" style="display:none"></p>
+            </div>
             <p class="proxy-status" id="proxy-status"></p>
           </div>
 
@@ -111,45 +129,21 @@
           <div id="settings-section" class="section settings-section">
             <div class="settings-row">
               <div class="setting-item">
-                <label>注册数量</label>
-                <input type="number" id="loop-count" min="1" max="100" value="1" class="setting-input">
+                <label>注册数量 <span style="font-size:11px;color:#888">(0=无限)</span></label>
+                <input type="number" id="loop-count" min="0" max="100" value="0" class="setting-input">
               </div>
               <div class="setting-item">
                 <label>并发窗口</label>
                 <input type="number" id="concurrency" min="1" max="3" value="1" class="setting-input">
               </div>
             </div>
-            <p class="settings-hint">Gmail 建议并发 1；MoeMail 支持多并发</p>
+            <p class="settings-hint">建议并发设为 1，多窗口容易会话混淆</p>
           </div>
 
           <div id="action-section" class="section">
             <button id="start-btn" class="btn btn-primary">开始注册</button>
             <button id="stop-btn" class="btn btn-danger" style="display:none">停止</button>
             <button id="reset-btn" class="btn btn-outline" style="display:none">重新开始</button>
-          </div>
-
-          <!-- Token Pool -->
-          <div id="token-pool-section" class="section">
-            <div class="section-header">
-              <h2>Token Pool</h2>
-              <div class="section-actions">
-                <button id="pool-upload-btn" class="btn-small btn-small-primary" style="display:none" title="上传有效 Token 至 Pool">上传</button>
-              </div>
-            </div>
-            <div id="pool-config" class="pool-config">
-              <div class="pool-input-row">
-                <input type="text" id="pool-api-key" placeholder="输入 API Key" class="pool-input">
-                <button id="pool-connect-btn" class="btn-small">连接</button>
-              </div>
-              <p class="pool-hint">在 Token Pool 网站生成 API Key</p>
-            </div>
-            <div id="pool-user-info" class="pool-user-info" style="display:none">
-              <div class="pool-user-row">
-                <span class="pool-user-name" id="pool-username">-</span>
-                <span class="pool-user-points" id="pool-points">0 积分</span>
-                <button id="pool-disconnect-btn" class="btn-small btn-small-danger">断开</button>
-              </div>
-            </div>
           </div>
 
         </div>
@@ -337,11 +331,6 @@
   const validateBtn = $('#validate-btn');
   const validateSection = $('#validate-section');
   const validateText = $('#validate-text');
-  const gmailAddressInput = $('#gmail-address');
-  const gmailSaveBtn = $('#gmail-save-btn');
-  const gmailStatus = $('#gmail-status');
-  const mailProviderSelect = $('#mail-provider');
-  const gmailConfigDiv = $('#gmail-config');
   const moemailConfigDiv = $('#moemail-config');
   const moemailApiUrlInput = $('#moemail-api-url');
   const moemailApiKeyInput = $('#moemail-api-key');
@@ -359,28 +348,27 @@
   const proxyPoolList = $('#proxy-pool-list');
   const proxyPoolSaveBtn = $('#proxy-pool-save-btn');
   const proxyStatus = $('#proxy-status');
-  const poolApiKeyInput = $('#pool-api-key');
-  const poolConnectBtn = $('#pool-connect-btn');
-  const poolDisconnectBtn = $('#pool-disconnect-btn');
-  const poolUploadBtn = $('#pool-upload-btn');
-  const poolConfig = $('#pool-config');
-  const poolUserInfo = $('#pool-user-info');
-  const poolUsername = $('#pool-username');
-  const poolPoints = $('#pool-points');
-
+  const proxySocks5Config = $('#proxy-socks5-config');
+  const socks5HostInput = $('#socks5-host');
+  const socks5PortInput = $('#socks5-port');
+  const socks5AuthCheck = $('#socks5-auth-check');
+  const socks5AuthFields = $('#socks5-auth-fields');
+  const socks5UsernameInput = $('#socks5-username');
+  const socks5PasswordInput = $('#socks5-password');
+  const socks5SaveBtn = $('#socks5-save-btn');
+  const proxySubscriptionConfig = $('#proxy-subscription-config');
+  const proxySubscriptionUrlInput = $('#proxy-subscription-url');
+  const proxySubscriptionFetchBtn = $('#proxy-subscription-fetch-btn');
+  const proxySubscriptionInfo = $('#proxy-subscription-info');
   // ============== 状态变量 ==============
 
-  let gmailAddress = '';
   let moemailConfig = { apiUrl: '', apiKey: '', domain: '' };
   let proxyConfig = { mode: 'none', address: '', apiUrl: '', pool: '' };
-  const POOL_API_URL = 'http://localhost:8080';
-  let poolApiKey = '';
-  let poolUser = null;
 
   // ============== UI 更新 ==============
 
   function updateUI(state) {
-    console.log('[Panel] 更新 UI:', state);
+    _log('[Panel] 更新 UI:', state);
 
     statusDot.className = 'dot';
     switch (state.status) {
@@ -468,7 +456,7 @@
       historyList.innerHTML = '<div class="history-empty">暂无记录</div>';
       return;
     }
-    historyList.innerHTML = history.slice(0, 20).map(item => {
+    historyList.innerHTML = history.slice(0, 50).map(item => {
       let statusClass = item.success ? 'success' : 'failed';
       if (item.success && item.tokenStatus) {
         const m = { valid:'success', suspended:'suspended', expired:'expired', invalid:'invalid', error:'error', unknown:'unknown' };
@@ -582,28 +570,24 @@
       button.textContent = '已复制';
       setTimeout(() => { button.classList.remove('copied'); button.textContent = orig; }, 1500);
     } catch (err) {
-      console.error('复制失败:', err);
+      _err('复制失败:', err);
     }
   }
 
   // ============== 注册控制 ==============
 
   async function startRegistration() {
-    const loopCount = parseInt(loopCountInput.value) || 1;
+    const parsedLoop = parseInt(loopCountInput.value);
+    const loopCount = isNaN(parsedLoop) ? 1 : parsedLoop;
     const concurrency = parseInt(concurrencyInput.value) || 1;
-    const mailProv = mailProviderSelect.value;
 
-    if (mailProv === 'gmail') {
-      if (!gmailAddress) { await showAlert('请先配置 Gmail 地址'); gmailAddressInput.focus(); return; }
-    } else if (mailProv === 'moemail') {
-      if (!moemailConfig.apiUrl || !moemailConfig.apiKey) { await showAlert('请先配置 MoeMail API 地址和 API Key'); moemailApiUrlInput.focus(); return; }
-    }
+    if (!moemailConfig.apiUrl || !moemailConfig.apiKey) { await showAlert('请先配置 MoeMail API 地址和 API Key'); moemailApiUrlInput.focus(); return; }
 
-    if (loopCount < 1 || loopCount > 100) { await showAlert('注册数量需在 1-100 之间'); return; }
+    if (loopCount < 0 || loopCount > 100) { await showAlert('注册数量需在 0-100 之间（0 = 无限循环）'); return; }
     if (concurrency < 1 || concurrency > 3) { await showAlert('并发窗口需在 1-3 之间'); return; }
 
-    if (mailProv === 'gmail' && concurrency > 1) {
-      const ok = await showConfirm('使用 Gmail 别名模式时，建议并发设为 1（需要手动输入验证码）。\n\n是否继续？');
+    if (concurrency > 1) {
+      const ok = await showConfirm('建议并发设为 1，多窗口容易出现会话混淆。\n\n是否继续？');
       if (!ok) return;
     }
 
@@ -611,8 +595,8 @@
     try {
       const response = await chrome.runtime.sendMessage({
         type: 'START_BATCH_REGISTRATION',
-        loopCount, concurrency, gmailAddress,
-        mailProvider: mailProv,
+        loopCount, concurrency,
+        mailProvider: 'moemail',
         moemailApiUrl: moemailConfig.apiUrl,
         moemailApiKey: moemailConfig.apiKey,
         moemailDomain: moemailConfig.domain,
@@ -620,10 +604,11 @@
         proxyAddress: proxyConfig.address,
         proxyApiUrl: proxyConfig.apiUrl,
         proxyPool: proxyConfig.pool,
+        proxySubscriptionUrl: proxyConfig.subscriptionUrl || '',
       });
       if (response.state) updateUI(response.state);
     } catch (error) {
-      console.error('[Panel] 注册错误:', error);
+      _err('[Panel] 注册错误:', error);
       updateUI({ status: 'error', error: error.message });
     } finally {
       startBtn.disabled = false;
@@ -632,7 +617,7 @@
 
   async function stopRegistration() {
     try { await chrome.runtime.sendMessage({ type: 'STOP_REGISTRATION' }); }
-    catch (error) { console.error('[Panel] 停止错误:', error); }
+    catch (error) { _err('[Panel] 停止错误:', error); }
   }
 
   async function reset() {
@@ -640,7 +625,7 @@
       await chrome.runtime.sendMessage({ type: 'RESET' });
       const response = await chrome.runtime.sendMessage({ type: 'GET_STATE' });
       updateUI(response?.state || { status: 'idle', history: [] });
-    } catch (error) { console.error('[Panel] 重置错误:', error); }
+    } catch (error) { _err('[Panel] 重置错误:', error); }
   }
 
   async function exportHistory() {
@@ -667,7 +652,7 @@
       if (validRecords.length < totalSuccess) {
         await showAlert(`已导出 ${validRecords.length} 个有效账号（共 ${totalSuccess} 个成功注册，${totalSuccess - validRecords.length} 个被过滤）`);
       }
-    } catch (error) { console.error('[Panel] 导出错误:', error); }
+    } catch (error) { _err('[Panel] 导出错误:', error); }
   }
 
   async function exportHistoryCSV() {
@@ -684,7 +669,7 @@
       ]);
       const csv = [headers,...rows].map(row => row.map(cell => `"${(cell||'').replace(/"/g,'""')}"`).join(',')).join('\n');
       triggerDownload('\uFEFF' + csv, `accounts-${new Date().toISOString().slice(0, 10)}.csv`, 'text/csv;charset=utf-8');
-    } catch (error) { console.error('[Panel] 导出 CSV 错误:', error); }
+    } catch (error) { _err('[Panel] 导出 CSV 错误:', error); }
   }
 
   function triggerDownload(content, filename, mimeType) {
@@ -705,7 +690,7 @@
     try {
       await chrome.runtime.sendMessage({ type: 'CLEAR_HISTORY' });
       renderHistory([]);
-    } catch (error) { console.error('[Panel] 清空错误:', error); }
+    } catch (error) { _err('[Panel] 清空错误:', error); }
   }
 
   async function validateAllTokens() {
@@ -740,7 +725,7 @@
       const stateResponse = await chrome.runtime.sendMessage({ type: 'GET_STATE' });
       if (stateResponse?.state) updateUI(stateResponse.state);
     } catch (error) {
-      console.error('[Panel] 验证错误:', error);
+      _err('[Panel] 验证错误:', error);
       validateSection.classList.add('validate-result');
       validateText.textContent = '验证失败: ' + error.message;
     } finally {
@@ -748,16 +733,11 @@
     }
   }
 
-  // ============== 邮箱渠道 ==============
-
-  function switchMailProvider(provider) {
-    gmailConfigDiv.style.display = provider === 'gmail' ? 'block' : 'none';
-    moemailConfigDiv.style.display = provider === 'moemail' ? 'block' : 'none';
-  }
+  // ============== MoeMail 配置 ==============
 
   async function loadMoemailConfig() {
     try {
-      const result = await chrome.storage.local.get(['moemailConfig', 'mailProvider']);
+      const result = await chrome.storage.local.get(['moemailConfig']);
       if (result.moemailConfig) {
         moemailConfig = result.moemailConfig;
         moemailApiUrlInput.value = moemailConfig.apiUrl || '';
@@ -765,11 +745,7 @@
         moemailDomainInput.value = moemailConfig.domain || '';
         if (moemailConfig.apiUrl && moemailConfig.apiKey) updateMoemailStatus(true);
       }
-      if (result.mailProvider) {
-        mailProviderSelect.value = result.mailProvider;
-        switchMailProvider(result.mailProvider);
-      }
-    } catch (error) { console.error('[MoeMail] 加载配置错误:', error); }
+    } catch (error) { _err('[MoeMail] 加载配置错误:', error); }
   }
 
   async function saveMoemailConfig() {
@@ -796,8 +772,10 @@
 
   function switchProxyMode(mode) {
     proxyManualConfig.style.display = mode === 'manual' ? 'block' : 'none';
+    proxySocks5Config.style.display = mode === 'socks5' ? 'block' : 'none';
     proxyApiConfig.style.display = mode === 'api' ? 'block' : 'none';
     proxyPoolConfig.style.display = mode === 'pool' ? 'block' : 'none';
+    proxySubscriptionConfig.style.display = mode === 'subscription' ? 'block' : 'none';
   }
 
   async function loadProxyConfig() {
@@ -810,17 +788,45 @@
         proxyApiUrlInput.value = proxyConfig.apiUrl || '';
         proxyPoolList.value = proxyConfig.pool || '';
         switchProxyMode(proxyConfig.mode);
+        // 回填订阅链接
+        if (proxyConfig.subscriptionUrl) {
+          proxySubscriptionUrlInput.value = proxyConfig.subscriptionUrl;
+        }
+        // 回填 socks5 字段
+        if (proxyConfig.mode === 'socks5' && proxyConfig.address) {
+          try {
+            const url = new URL(proxyConfig.address);
+            socks5HostInput.value = url.hostname || '';
+            socks5PortInput.value = url.port || '';
+            if (url.username) {
+              socks5AuthCheck.checked = true;
+              socks5AuthFields.style.display = 'block';
+              socks5UsernameInput.value = decodeURIComponent(url.username);
+              socks5PasswordInput.value = decodeURIComponent(url.password || '');
+            }
+          } catch {}
+        }
         if (proxyConfig.mode !== 'none') updateProxyStatus(true);
       }
-    } catch (error) { console.error('[Proxy] 加载配置错误:', error); }
+    } catch (error) { _err('[Proxy] 加载配置错误:', error); }
   }
 
   async function saveProxyConfig() {
     const mode = proxyModeSelect.value;
     proxyConfig.mode = mode;
     if (mode === 'manual') proxyConfig.address = proxyAddressInput.value.trim();
+    else if (mode === 'socks5') {
+      const host = socks5HostInput.value.trim();
+      const port = socks5PortInput.value.trim();
+      if (!host || !port) { proxyStatus.textContent = '请输入 IP 和端口'; proxyStatus.classList.add('error'); return; }
+      const user = socks5AuthCheck.checked ? socks5UsernameInput.value.trim() : '';
+      const pass = socks5AuthCheck.checked ? socks5PasswordInput.value.trim() : '';
+      const auth = user && pass ? `${encodeURIComponent(user)}:${encodeURIComponent(pass)}@` : '';
+      proxyConfig.address = `socks5://${auth}${host}:${port}`;
+    }
     else if (mode === 'api') proxyConfig.apiUrl = proxyApiUrlInput.value.trim();
     else if (mode === 'pool') proxyConfig.pool = proxyPoolList.value.trim();
+    else if (mode === 'subscription') proxyConfig.subscriptionUrl = proxySubscriptionUrlInput.value.trim();
     try {
       await chrome.storage.local.set({ proxyConfig });
       updateProxyStatus(true);
@@ -861,158 +867,40 @@
     }
   }
 
+  async function fetchSubscriptionNodes() {
+    const url = proxySubscriptionUrlInput.value.trim();
+    if (!url) { proxyStatus.textContent = '请输入订阅链接'; proxyStatus.classList.add('error'); return; }
+
+    proxySubscriptionFetchBtn.disabled = true;
+    proxySubscriptionFetchBtn.textContent = '提取中...';
+    proxySubscriptionInfo.style.display = 'none';
+
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'FETCH_SUBSCRIPTION', url });
+      if (!response.success) throw new Error(response.error);
+
+      proxyConfig.subscriptionUrl = url;
+      proxyConfig.mode = 'subscription';
+      await chrome.storage.local.set({ proxyConfig });
+
+      proxySubscriptionInfo.textContent = `✓ 已提取 ${response.count} 个节点`;
+      proxySubscriptionInfo.style.display = 'block';
+      proxyStatus.textContent = `✓ 订阅: ${response.count} 个节点`;
+      proxyStatus.classList.remove('error');
+    } catch (error) {
+      proxyStatus.textContent = '订阅提取失败: ' + error.message;
+      proxyStatus.classList.add('error');
+    } finally {
+      proxySubscriptionFetchBtn.disabled = false;
+      proxySubscriptionFetchBtn.textContent = '提取';
+    }
+  }
+
   function updateProxyStatus(saved) {
     if (!saved || proxyConfig.mode === 'none') { proxyStatus.textContent = ''; return; }
-    const labels = { manual: '手动代理', api: 'API 提取', pool: '代理池' };
+    const labels = { manual: '手动代理', socks5: 'SOCKS5', api: 'API 提取', pool: '代理池', subscription: '订阅' };
     proxyStatus.textContent = `✓ 模式: ${labels[proxyConfig.mode] || proxyConfig.mode}`;
     proxyStatus.classList.remove('error');
-  }
-
-  // ============== Gmail 配置 ==============
-
-  async function loadGmailConfig() {
-    try {
-      const result = await chrome.storage.local.get(['gmailAddress']);
-      if (result.gmailAddress) {
-        gmailAddress = result.gmailAddress;
-        gmailAddressInput.value = gmailAddress;
-        updateGmailStatus(true);
-      }
-    } catch (error) { console.error('[Gmail] 加载配置错误:', error); }
-  }
-
-  async function saveGmailConfig() {
-    const email = gmailAddressInput.value.trim();
-    if (!email) { gmailStatus.textContent = '请输入邮箱地址'; gmailStatus.classList.add('error'); return; }
-    if (!email.includes('@')) { gmailStatus.textContent = '邮箱格式无效'; gmailStatus.classList.add('error'); return; }
-    try {
-      gmailAddress = email;
-      await chrome.storage.local.set({ gmailAddress: email });
-      updateGmailStatus(true);
-    } catch (error) { gmailStatus.textContent = '保存失败: ' + error.message; gmailStatus.classList.add('error'); }
-  }
-
-  function updateGmailStatus(saved) {
-    if (saved && gmailAddress) {
-      gmailStatus.textContent = `✓ 已配置: ${gmailAddress}`;
-      gmailStatus.classList.remove('error');
-    } else { gmailStatus.textContent = ''; gmailStatus.classList.remove('error'); }
-  }
-
-  // ============== Token Pool ==============
-
-  async function loadPoolConfig() {
-    try {
-      const result = await chrome.storage.local.get(['poolApiKey']);
-      if (result.poolApiKey) {
-        poolApiKey = result.poolApiKey;
-        poolApiKeyInput.value = poolApiKey;
-        await connectToPool();
-      }
-    } catch (error) { console.error('[Pool] 加载配置错误:', error); }
-  }
-
-  async function connectToPool() {
-    const apiKey = poolApiKeyInput.value.trim();
-    if (!apiKey) { await showAlert('请输入 API Key'); return; }
-
-    poolConnectBtn.disabled = true;
-    poolConnectBtn.textContent = '连接中...';
-
-    try {
-      const resp = await swFetch(`${POOL_API_URL}/api/cli/profile`, {
-        method: 'GET',
-        headers: { 'X-API-Key': apiKey }
-      });
-      if (!resp.ok) {
-        let errMsg = '连接失败';
-        try { const d = JSON.parse(resp.body); errMsg = d.error || errMsg; } catch {}
-        throw new Error(errMsg);
-      }
-      const user = JSON.parse(resp.body);
-      poolApiKey = apiKey;
-      poolUser = user;
-      await chrome.storage.local.set({ poolApiKey: apiKey });
-      updatePoolUI();
-    } catch (error) {
-      console.error('[Pool] 连接错误:', error);
-      await showAlert('连接失败: ' + error.message);
-    } finally {
-      poolConnectBtn.disabled = false;
-      poolConnectBtn.textContent = '连接';
-    }
-  }
-
-  async function disconnectFromPool() {
-    poolApiKey = '';
-    poolUser = null;
-    await chrome.storage.local.remove(['poolApiKey']);
-    poolApiKeyInput.value = '';
-    updatePoolUI();
-  }
-
-  function updatePoolUI() {
-    if (poolUser) {
-      poolConfig.style.display = 'none';
-      poolUserInfo.style.display = 'flex';
-      poolUsername.textContent = poolUser.username || poolUser.email;
-      poolPoints.textContent = `${poolUser.points} 积分`;
-      poolUploadBtn.style.display = 'inline-flex';
-    } else {
-      poolConfig.style.display = 'block';
-      poolUserInfo.style.display = 'none';
-      poolUploadBtn.style.display = 'none';
-    }
-  }
-
-  async function uploadToPool() {
-    if (!poolApiKey || !poolUser) { await showAlert('请先连接 Token Pool'); return; }
-
-    try {
-      const response = await chrome.runtime.sendMessage({ type: 'EXPORT_HISTORY' });
-      const history = response.history || [];
-      const validRecords = history.filter(r => r.success && r.token && r.tokenStatus === 'valid');
-      if (validRecords.length === 0) { await showAlert('没有可上传的有效 Token\n\n请先验证 Token 状态'); return; }
-
-      const ok = await showConfirm(`确定上传 ${validRecords.length} 个有效 Token 至 Pool？`);
-      if (!ok) return;
-
-      poolUploadBtn.disabled = true;
-      poolUploadBtn.textContent = '上传中...';
-
-      const tokens = validRecords.map(r => ({
-        email: r.email, clientId: r.token.clientId, clientSecret: r.token.clientSecret,
-        accessToken: r.token.accessToken, refreshToken: r.token.refreshToken
-      }));
-
-      const resp = await swFetch(`${POOL_API_URL}/api/cli/upload`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-Key': poolApiKey },
-        body: JSON.stringify({ tokens })
-      });
-
-      const result = JSON.parse(resp.body);
-      if (!resp.ok) throw new Error(result.error || '上传失败');
-
-      if (result.current_points !== undefined) {
-        poolUser.points = result.current_points;
-        poolPoints.textContent = `${poolUser.points} 积分`;
-      }
-
-      let message = '上传成功！\n\n';
-      if (result.new_count > 0) message += `新增: ${result.new_count}\n`;
-      if (result.update_count > 0) message += `更新: ${result.update_count}\n`;
-      if (result.skip_count > 0) message += `跳过: ${result.skip_count}\n`;
-      if (result.valid_count > 0) message += `有效: ${result.valid_count}\n`;
-      if (result.points_earned > 0) message += `\n获得 ${result.points_earned} 积分`;
-      await showAlert(message);
-    } catch (error) {
-      console.error('[Pool] 上传错误:', error);
-      await showAlert('上传失败: ' + error.message);
-    } finally {
-      poolUploadBtn.disabled = false;
-      poolUploadBtn.textContent = '上传';
-    }
   }
 
   // ============== 面板显示/隐藏 ==============
@@ -1056,12 +944,10 @@
     try {
       const response = await chrome.runtime.sendMessage({ type: 'GET_STATE' });
       if (response?.state) updateUI(response.state);
-    } catch (error) { console.error('[Panel] 获取状态错误:', error); }
+    } catch (error) { _err('[Panel] 获取状态错误:', error); }
 
-    await loadGmailConfig();
     await loadMoemailConfig();
     await loadProxyConfig();
-    await loadPoolConfig();
 
     // 绑定按钮事件
     startBtn.addEventListener('click', startRegistration);
@@ -1071,14 +957,6 @@
     exportCsvBtn.addEventListener('click', exportHistoryCSV);
     clearBtn.addEventListener('click', clearHistory);
     validateBtn.addEventListener('click', validateAllTokens);
-
-    gmailSaveBtn.addEventListener('click', saveGmailConfig);
-    gmailAddressInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') saveGmailConfig(); });
-
-    mailProviderSelect.addEventListener('change', (e) => {
-      switchMailProvider(e.target.value);
-      chrome.storage.local.set({ mailProvider: e.target.value });
-    });
 
     moemailSaveBtn.addEventListener('click', saveMoemailConfig);
 
@@ -1091,10 +969,11 @@
     proxySaveBtn.addEventListener('click', saveProxyConfig);
     proxyFetchBtn.addEventListener('click', fetchProxiesFromApi);
     proxyPoolSaveBtn.addEventListener('click', saveProxyConfig);
-
-    poolConnectBtn.addEventListener('click', connectToPool);
-    poolDisconnectBtn.addEventListener('click', disconnectFromPool);
-    poolUploadBtn.addEventListener('click', uploadToPool);
+    proxySubscriptionFetchBtn.addEventListener('click', fetchSubscriptionNodes);
+    socks5AuthCheck.addEventListener('change', () => {
+      socks5AuthFields.style.display = socks5AuthCheck.checked ? 'block' : 'none';
+    });
+    socks5SaveBtn.addEventListener('click', saveProxyConfig);
 
     // 复制按钮
     shadow.querySelectorAll('.copy-btn').forEach(btn => {

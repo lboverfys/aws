@@ -96,13 +96,16 @@
           </svg>
         </div>
         <div class="toast-text">
-          <div class="toast-title">AWS Auto</div>
+          <div class="toast-title">Auto</div>
           <div class="toast-step"></div>
           <div class="toast-counter" style="display:none;"></div>
         </div>
       </div>
     `;
     shadow.appendChild(toastContainer);
+    toastHost.style.display = 'contents';
+    // 插入到 body 末尾而非开头，减少被遍历 children 时发现的概率
+    // 同时设置 data 属性为常见的第三方脚本名称，降低可疑度
     document.body.appendChild(toastHost);
 
     toastContent = {
@@ -131,7 +134,10 @@
     toastContent.step.textContent = step;
 
     // 更新计数器 - 支持新的状态格式
-    if (state.totalTarget > 1) {
+    if (state.infiniteMode) {
+      toastContent.counter.style.display = 'block';
+      toastContent.counter.textContent = `已注册: ${state.totalRegistered} (无限模式)`;
+    } else if (state.totalTarget > 1) {
       toastContent.counter.style.display = 'block';
       toastContent.counter.textContent = `进度: ${state.totalRegistered}/${state.totalTarget}`;
     } else if (state.loopMode && state.loopCount > 0) {
@@ -176,7 +182,7 @@
     } else {
       // 进行中状态 (running, polling_token, initializing 等)
       const isMultiWindow = state.totalTarget > 1 || (state.sessions && state.sessions.length > 1);
-      toastContent.title.textContent = isMultiWindow ? '批量注册中' : 'AWS 自动注册';
+      toastContent.title.textContent = isMultiWindow ? '批量注册中' : '自动注册';
       toastContent.icon.classList.add('spinning');
       toastContent.icon.innerHTML = `
         <svg viewBox="0 0 24 24" fill="none" stroke="#ff9900" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -315,27 +321,33 @@
   }
 
   /**
-   * 获取验证码（Gmail 别名模式 - 等待用户手动输入）
+   * 获取验证码（MoeMail 自动获取）
    */
   async function getVerificationCode() {
     if (verificationCode) {
       return verificationCode;
     }
 
-    updateStep('请手动填写验证码（从 Gmail 收件箱获取）');
+    updateStep('正在获取验证码...');
 
     try {
       const response = await chrome.runtime.sendMessage({ type: 'GET_VERIFICATION_CODE' });
+      console.log('[Content] GET_VERIFICATION_CODE 响应:', response);
+
       if (response && response.success) {
         verificationCode = response.code;
         return verificationCode;
       }
 
-      // Gmail 别名模式，需要用户手动输入
-      if (response && response.needManualInput) {
-        return null; // 返回 null 表示需要手动输入
+      // MoeMail 模式超时或失败，返回 'retry' 标记以便重试
+      if (response && !response.success) {
+        console.warn('[Content] 验证码获取失败:', response.error);
+        return 'retry';
       }
-    } catch (_) {}
+    } catch (e) {
+      console.error('[Content] GET_VERIFICATION_CODE 异常:', e);
+      return 'retry';
+    }
     return null;
   }
 
@@ -344,6 +356,27 @@
    */
   function randomDelay(min, max) {
     return new Promise(resolve => setTimeout(resolve, min + Math.random() * (max - min)));
+  }
+
+  /**
+   * 根据字符返回正确的 KeyboardEvent.code
+   */
+  function charToCode(char) {
+    if (char >= 'a' && char <= 'z') return 'Key' + char.toUpperCase();
+    if (char >= 'A' && char <= 'Z') return 'Key' + char;
+    if (char >= '0' && char <= '9') return 'Digit' + char;
+    const map = {
+      ' ': 'Space', '.': 'Period', ',': 'Comma', '/': 'Slash',
+      '\\': 'Backslash', '-': 'Minus', '=': 'Equal', ';': 'Semicolon',
+      "'": 'Quote', '`': 'Backquote', '[': 'BracketLeft', ']': 'BracketRight',
+      '@': 'Digit2', '!': 'Digit1', '#': 'Digit3', '$': 'Digit4',
+      '%': 'Digit5', '^': 'Digit6', '&': 'Digit7', '*': 'Digit8',
+      '(': 'Digit9', ')': 'Digit0', '_': 'Minus', '+': 'Equal',
+      '{': 'BracketLeft', '}': 'BracketRight', '|': 'Backslash',
+      ':': 'Semicolon', '"': 'Quote', '<': 'Comma', '>': 'Period',
+      '?': 'Slash', '~': 'Backquote',
+    };
+    return map[char] || 'Unidentified';
   }
 
   /**
@@ -362,9 +395,10 @@
     // 逐字符输入
     for (let i = 0; i < text.length; i++) {
       const char = text[i];
+      const code = charToCode(char);
 
       // keydown
-      el.dispatchEvent(new KeyboardEvent('keydown', { key: char, code: 'Key' + char.toUpperCase(), bubbles: true, cancelable: true }));
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: char, code, bubbles: true, cancelable: true }));
 
       // 设置值
       nativeSetter.call(el, text.slice(0, i + 1));
@@ -373,11 +407,12 @@
       el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: char }));
 
       // keyup
-      el.dispatchEvent(new KeyboardEvent('keyup', { key: char, code: 'Key' + char.toUpperCase(), bubbles: true, cancelable: true }));
+      el.dispatchEvent(new KeyboardEvent('keyup', { key: char, code, bubbles: true, cancelable: true }));
 
-      // 每个字符之间随机间隔 30-80ms（模拟打字速度）
+      // 每个字符之间随机间隔（模拟真实打字速度，偶尔有停顿）
       if (i < text.length - 1) {
-        await randomDelay(30, 80);
+        const pause = Math.random() < 0.12 ? 250 + Math.random() * 450 : 45 + Math.random() * 100;
+        await randomDelay(pause * 0.8, pause * 1.2);
       }
     }
 
@@ -386,9 +421,9 @@
   }
 
   /**
-   * 模拟真实点击（鼠标移动序列 + 可信点击）
+   * 模拟真实点击（鼠标移动序列 + 随机延迟 + 可信点击）
    */
-  function humanClick(btn) {
+  async function humanClick(btn) {
     if (!btn) return false;
 
     if (btn.offsetParent === null || btn.disabled) {
@@ -401,13 +436,17 @@
     const y = rect.top + rect.height * (0.3 + Math.random() * 0.4);
     const eventInit = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 };
 
-    // 鼠标移动序列（增加真实感，isTrusted 不影响这些事件）
+    // 鼠标移动序列（带随机延迟模拟真实鼠标轨迹）
     btn.dispatchEvent(new MouseEvent('mouseover', eventInit));
     btn.dispatchEvent(new MouseEvent('mouseenter', { ...eventInit, bubbles: false }));
+    await randomDelay(12, 35);
     btn.dispatchEvent(new MouseEvent('mousemove', eventInit));
+    await randomDelay(20, 55);
     btn.dispatchEvent(new MouseEvent('mousedown', eventInit));
     btn.focus();
+    await randomDelay(40, 120);
     btn.dispatchEvent(new MouseEvent('mouseup', eventInit));
+    await randomDelay(5, 15);
 
     // 使用 btn.click() 触发可信点击（isTrusted: true）
     btn.click();
@@ -453,22 +492,38 @@
       return PAGE_TYPES.VERIFY;
     }
 
-    // 姓名页
-    if (url.includes('enter-email') || url.includes('signup/enter') || url.includes('createAccount')) {
-      return PAGE_TYPES.NAME;
+    // 密码页 — 只要有一个密码输入框即可识别，不再要求同时找到确认框
+    // 通过 URL 或页面上存在多个 password 输入框来判断
+    if (url.includes('password') || url.includes('setPassword') || url.includes('create-password')) {
+      return PAGE_TYPES.PASSWORD;
     }
-
-    // 密码页
+    const allPwdInputs = document.querySelectorAll('input[type="password"]');
+    if (allPwdInputs.length >= 2) {
+      return PAGE_TYPES.PASSWORD;
+    }
+    // 单个密码框 + 有 "Re-enter" 或 "Confirm" 相关提示也算密码页
     const pwdInput = $('input[placeholder="Enter password"], input[name="password"], input[type="password"][autocomplete="new-password"]');
-    const confirmPwdInput = $('input[placeholder="Re-enter password"], input[name="confirmPassword"], input[type="password"][autocomplete="new-password"]:nth-of-type(2)');
+    const confirmPwdInput = $('input[placeholder="Re-enter password"], input[name="confirmPassword"]');
     if (pwdInput && confirmPwdInput) {
       return PAGE_TYPES.PASSWORD;
     }
 
-    // 登录页 - 支持多种选择器
+    // 登录/邮箱页 — 优先用 DOM 检测，因为 SPA 的 URL 可能不变
+    // 有 email 输入框 → 邮箱输入步骤（LOGIN）
     const emailInput = $('input[placeholder="username@example.com"], input[name="email"], input[type="email"], input[autocomplete="username"]');
     if (emailInput) {
       return PAGE_TYPES.LOGIN;
+    }
+
+    // 姓名页 — 用 DOM 检测（此时已排除有 email 输入框的登录页）
+    const nameInputFallback = $('input[placeholder="Maria José Silva"], input[placeholder*="name" i], input[name="name"], input[name="fullName"]');
+    if (nameInputFallback) {
+      return PAGE_TYPES.NAME;
+    }
+
+    // 姓名页 — URL 回退（DOM 未渲染但 URL 已变）
+    if (url.includes('signup/enter') || url.includes('createAccount')) {
+      return PAGE_TYPES.NAME;
     }
 
     return PAGE_TYPES.UNKNOWN;
@@ -487,10 +542,10 @@
   /**
    * 处理 Cookie 弹窗
    */
-  function handleCookiePopup() {
+  async function handleCookiePopup() {
     const btn = $('button[data-id="awsccc-cb-btn-accept"]');
     if (btn) {
-      humanClick(btn);
+      await humanClick(btn);
     }
   }
 
@@ -512,11 +567,11 @@
     }
 
     await humanFill(emailInput, info.email);
-    await randomDelay(300, 700);
+    await randomDelay(500, 1200);
 
     updateStep('点击继续...');
     const btn = $('button[data-testid="test-primary-button"], button[type="submit"], button.awsui-button-variant-primary');
-    if (btn) humanClick(btn);
+    if (btn) await humanClick(btn);
 
     return true;
   }
@@ -533,54 +588,61 @@
       return false;
     }
 
-    const nameInput = $('input[placeholder="Maria José Silva"], input[placeholder*="name" i], input[name="name"], input[name="fullName"]');
+    // 等待姓名输入框出现（SPA 页面 DOM 可能延迟渲染）
+    let nameInput = null;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      nameInput = $('input[placeholder="Maria José Silva"], input[placeholder*="name" i], input[name="name"], input[name="fullName"]');
+      if (nameInput) break;
+      await randomDelay(150, 300);
+    }
+
     if (!nameInput) {
       return false;
     }
 
     await humanFill(nameInput, info.fullName);
-    await randomDelay(300, 700);
+    await randomDelay(500, 1200);
 
     updateStep('点击继续...');
     const btn = $('button[data-testid="signup-next-button"], button[type="submit"], button.awsui-button-variant-primary');
-    if (btn) humanClick(btn);
+    if (btn) await humanClick(btn);
 
     return true;
   }
 
   /**
-   * 处理验证码页（Gmail 别名模式 - 用户手动输入）
+   * 处理验证码页（MoeMail 自动获取并填写）
    */
   async function handleVerifyPage() {
-    updateStep('请手动填写验证码');
+    updateStep('正在获取验证码...');
 
     const code = await getVerificationCode();
-    
-    // Gmail 别名模式下，code 为 null，需要用户手动输入
-    if (!code) {
-      // 显示提示，等待用户手动输入
-      updateStep('📧 请从 Gmail 收件箱获取验证码并手动填写');
-      
-      // 不自动填写，让用户手动输入
-      // 但仍然标记这个页面已经被处理过（避免重复提示）
-      // 返回 true 表示已处理（提示用户），避免重复处理
-      // 用户手动填写后会自动点击按钮或按 Enter
-      return true;
+
+    // MoeMail 模式失败，返回 false 以便 processPage 不标记为已处理，下次轮询重试
+    if (code === 'retry') {
+      updateStep('验证码获取失败，等待重试...');
+      return false;
     }
 
-    // 如果有验证码（从其他来源获取），则自动填写
+    if (!code) {
+      updateStep('验证码获取失败');
+      return false;
+    }
+
+    // 自动填写验证码
     updateStep(`填写验证码: ${code}`);
-    const codeInput = $('input[placeholder*="位数"], input[placeholder*="digit" i], input[type="text"][maxlength="6"], input[name="code"], input[name="otp"]');
+    const codeInput = $('input[placeholder*="位数"], input[placeholder*="digit" i], input[placeholder*="stellig" i], input[placeholder*="chiffre" i], input[placeholder*="dígito" i], input[placeholder*="桁" i], input[id^="formField"][class*="awsui_input"], input[type="text"][maxlength="6"], input[name="code"], input[name="otp"]');
     if (!codeInput) {
+      console.warn('[Content] 找不到验证码输入框');
       return false;
     }
 
     await humanFill(codeInput, code);
-    await randomDelay(300, 700);
+    await randomDelay(500, 1200);
 
     updateStep('点击验证...');
     const btn = $('button[data-testid="email-verification-verify-button"], button[type="submit"], button.awsui-button-variant-primary');
-    if (btn) humanClick(btn);
+    if (btn) await humanClick(btn);
 
     return true;
   }
@@ -597,8 +659,23 @@
       return false;
     }
 
-    const pwdInput = $('input[placeholder="Enter password"], input[name="password"], input[type="password"]:not([name="confirmPassword"])');
-    const confirmInput = $('input[placeholder="Re-enter password"], input[name="confirmPassword"]');
+    // 等待密码输入框出现（页面跳转后 DOM 可能还没渲染完）
+    let pwdInput = null;
+    let confirmInput = null;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      // 找所有 password 输入框
+      const allPwd = document.querySelectorAll('input[type="password"]');
+      if (allPwd.length >= 2) {
+        pwdInput = allPwd[0];
+        confirmInput = allPwd[1];
+        break;
+      }
+      // 也尝试具名选择器
+      pwdInput = $('input[placeholder="Enter password"], input[name="password"], input[type="password"]:not([name="confirmPassword"])');
+      confirmInput = $('input[placeholder="Re-enter password"], input[name="confirmPassword"]');
+      if (pwdInput) break;
+      await randomDelay(150, 300);
+    }
 
     if (!pwdInput) {
       return false;
@@ -611,11 +688,11 @@
       await humanFill(confirmInput, info.password);
     }
 
-    await randomDelay(300, 700);
+    await randomDelay(500, 1200);
 
     updateStep('点击继续...');
     const btn = $('button[data-testid="test-primary-button"], button[type="submit"], button.awsui-button-variant-primary');
-    if (btn) humanClick(btn);
+    if (btn) await humanClick(btn);
 
     return true;
   }
@@ -629,7 +706,7 @@
 
     // 尝试多种选择器
     const btn = $('button#cli_verification_btn, button[data-testid="confirm-device-button"], button[type="submit"]');
-    if (btn && humanClick(btn)) {
+    if (btn && await humanClick(btn)) {
       updateStep('已确认设备，等待授权页...');
       return true;
     }
@@ -637,7 +714,7 @@
     // 如果找不到按钮，尝试查找所有包含 "Confirm" 文字的按钮
     const buttons = document.querySelectorAll('button');
     for (const b of buttons) {
-      if (b.textContent.includes('Confirm') && humanClick(b)) {
+      if (b.textContent.includes('Confirm') && await humanClick(b)) {
         updateStep('已确认设备，等待授权页...');
         return true;
       }
@@ -655,7 +732,7 @@
 
     // 尝试多种选择器
     const btn = $('button#cli_login_button, button[data-testid="allow-access-button"], input[type="submit"][value*="Allow"]');
-    if (btn && humanClick(btn)) {
+    if (btn && await humanClick(btn)) {
       updateStep('已允许访问，等待完成...');
       chrome.runtime.sendMessage({ type: 'AUTH_COMPLETED' }).catch(() => {});
       return true;
@@ -665,7 +742,7 @@
     const buttons = document.querySelectorAll('button, input[type="submit"]');
     for (const b of buttons) {
       const text = b.textContent || b.value || '';
-      if (text.includes('Allow') && humanClick(b)) {
+      if (text.includes('Allow') && await humanClick(b)) {
         updateStep('已允许访问，等待完成...');
         chrome.runtime.sendMessage({ type: 'AUTH_COMPLETED' }).catch(() => {});
         return true;
@@ -702,7 +779,7 @@
     }
 
     isProcessing = true;
-    handleCookiePopup();
+    await handleCookiePopup();
 
     const pageType = detectPageType();
 
@@ -753,12 +830,12 @@
     // 立即执行一次
     processPage();
 
-    // 使用随机间隔轮询（400-700ms），避免固定节奏被检测
+    // 使用随机间隔轮询（300-1200ms），避免固定节奏被检测
     function scheduleNext() {
       pollInterval = setTimeout(() => {
         processPage();
         if (pollInterval) scheduleNext();
-      }, 400 + Math.random() * 300);
+      }, 300 + Math.random() * 900);
     }
     scheduleNext();
   }

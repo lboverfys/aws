@@ -3,6 +3,10 @@
  * 支持自定义循环次数和多窗口并发
  */
 
+const _DEBUG = false;
+const _log = (...a) => { if (_DEBUG) console.log(...a); };
+const _err = (...a) => { if (_DEBUG) console.error(...a); };
+
 // DOM 元素
 const statusDot = document.getElementById('status-dot');
 const statusText = document.getElementById('status-text');
@@ -37,15 +41,7 @@ const validateBtn = document.getElementById('validate-btn');
 const validateSection = document.getElementById('validate-section');
 const validateText = document.getElementById('validate-text');
 
-// Gmail 配置元素
-const gmailAddressInput = document.getElementById('gmail-address');
-const gmailSaveBtn = document.getElementById('gmail-save-btn');
-const gmailStatus = document.getElementById('gmail-status');
-
-// 邮箱渠道选择
-const mailProviderSelect = document.getElementById('mail-provider');
-const gmailConfigDiv = document.getElementById('gmail-config');
-const moemailConfigDiv = document.getElementById('moemail-config');
+// MoeMail 配置元素
 const moemailApiUrlInput = document.getElementById('moemail-api-url');
 const moemailApiKeyInput = document.getElementById('moemail-api-key');
 const moemailDomainInput = document.getElementById('moemail-domain');
@@ -55,15 +51,22 @@ const moemailStatus = document.getElementById('moemail-status');
 // 代理配置元素
 const proxyModeSelect = document.getElementById('proxy-mode');
 const proxyManualConfig = document.getElementById('proxy-manual-config');
+const proxySocks5Config = document.getElementById('proxy-socks5-config');
 const proxyApiConfig = document.getElementById('proxy-api-config');
 const proxyPoolConfig = document.getElementById('proxy-pool-config');
 const proxyAddressInput = document.getElementById('proxy-address');
+const proxySocks5AddressInput = document.getElementById('proxy-socks5-address');
 const proxySaveBtn = document.getElementById('proxy-save-btn');
+const proxySocks5SaveBtn = document.getElementById('proxy-socks5-save-btn');
 const proxyApiUrlInput = document.getElementById('proxy-api-url');
 const proxyFetchBtn = document.getElementById('proxy-fetch-btn');
 const proxyPoolList = document.getElementById('proxy-pool-list');
 const proxyPoolSaveBtn = document.getElementById('proxy-pool-save-btn');
 const proxyStatus = document.getElementById('proxy-status');
+const proxySubscriptionConfig = document.getElementById('proxy-subscription-config');
+const proxySubscriptionUrlInput = document.getElementById('proxy-subscription-url');
+const proxySubscriptionFetchBtn = document.getElementById('proxy-subscription-fetch-btn');
+const proxySubscriptionInfo = document.getElementById('proxy-subscription-info');
 
 // Token Pool 元素
 const poolApiKeyInput = document.getElementById('pool-api-key');
@@ -74,9 +77,6 @@ const poolConfig = document.getElementById('pool-config');
 const poolUserInfo = document.getElementById('pool-user-info');
 const poolUsername = document.getElementById('pool-username');
 const poolPoints = document.getElementById('pool-points');
-
-// Gmail 配置
-let gmailAddress = '';
 
 // MoeMail 配置
 let moemailConfig = { apiUrl: '', apiKey: '', domain: '' };
@@ -93,7 +93,7 @@ let poolUser = null;
  * 更新 UI 状态
  */
 function updateUI(state) {
-  console.log('[Popup] 更新 UI:', state);
+  _log('[Popup] 更新 UI:', state);
 
   // 状态指示器
   statusDot.className = 'dot';
@@ -419,7 +419,7 @@ async function copyToClipboard(text, button) {
       button.textContent = originalText;
     }, 1500);
   } catch (err) {
-    console.error('复制失败:', err);
+    _err('复制失败:', err);
   }
 }
 
@@ -427,28 +427,20 @@ async function copyToClipboard(text, button) {
  * 开始注册
  */
 async function startRegistration() {
-  const loopCount = parseInt(loopCountInput.value) || 1;
+  const parsed = parseInt(loopCountInput.value);
+  const loopCount = isNaN(parsed) ? 1 : parsed;
   const concurrency = parseInt(concurrencyInput.value) || 1;
-  const mailProvider = mailProviderSelect.value;
 
-  // 检查邮箱配置
-  if (mailProvider === 'gmail') {
-    if (!gmailAddress) {
-      alert('请先配置 Gmail 地址');
-      gmailAddressInput.focus();
-      return;
-    }
-  } else if (mailProvider === 'moemail') {
-    if (!moemailConfig.apiUrl || !moemailConfig.apiKey) {
-      alert('请先配置 MoeMail API 地址和 API Key');
-      moemailApiUrlInput.focus();
-      return;
-    }
+  // 检查 MoeMail 配置
+  if (!moemailConfig.apiUrl || !moemailConfig.apiKey) {
+    alert('请先配置 MoeMail API 地址和 API Key');
+    moemailApiUrlInput.focus();
+    return;
   }
 
   // 验证输入
-  if (loopCount < 1 || loopCount > 100) {
-    alert('注册数量需在 1-100 之间');
+  if (loopCount < 0 || loopCount > 100) {
+    alert('注册数量需在 0-100 之间（0 = 无限循环）');
     return;
   }
   if (concurrency < 1 || concurrency > 3) {
@@ -456,9 +448,9 @@ async function startRegistration() {
     return;
   }
 
-  // Gmail 别名模式建议并发为 1
-  if (mailProvider === 'gmail' && concurrency > 1) {
-    const confirm = window.confirm('使用 Gmail 别名模式时，建议并发设为 1（需要手动输入验证码）。\n\n是否继续？');
+  // 建议并发为 1
+  if (concurrency > 1) {
+    const confirm = window.confirm('建议并发设为 1，多窗口容易出现会话混淆。\n\n是否继续？');
     if (!confirm) return;
   }
 
@@ -469,8 +461,7 @@ async function startRegistration() {
       type: 'START_BATCH_REGISTRATION',
       loopCount,
       concurrency,
-      gmailAddress,
-      mailProvider,
+      mailProvider: 'moemail',
       moemailApiUrl: moemailConfig.apiUrl,
       moemailApiKey: moemailConfig.apiKey,
       moemailDomain: moemailConfig.domain,
@@ -478,14 +469,15 @@ async function startRegistration() {
       proxyAddress: proxyConfig.address,
       proxyApiUrl: proxyConfig.apiUrl,
       proxyPool: proxyConfig.pool,
+      proxySubscriptionUrl: proxyConfig.subscriptionUrl || '',
     });
-    console.log('[Popup] 注册响应:', response);
+    _log('[Popup] 注册响应:', response);
 
     if (response.state) {
       updateUI(response.state);
     }
   } catch (error) {
-    console.error('[Popup] 注册错误:', error);
+    _err('[Popup] 注册错误:', error);
     updateUI({
       status: 'error',
       error: error.message
@@ -502,7 +494,7 @@ async function stopRegistration() {
   try {
     await chrome.runtime.sendMessage({ type: 'STOP_REGISTRATION' });
   } catch (error) {
-    console.error('[Popup] 停止错误:', error);
+    _err('[Popup] 停止错误:', error);
   }
 }
 
@@ -520,7 +512,7 @@ async function reset() {
       updateUI({ status: 'idle', history: [] });
     }
   } catch (error) {
-    console.error('[Popup] 重置错误:', error);
+    _err('[Popup] 重置错误:', error);
   }
 }
 
@@ -579,7 +571,7 @@ async function exportHistory() {
     }
 
   } catch (error) {
-    console.error('[Popup] 导出错误:', error);
+    _err('[Popup] 导出错误:', error);
   }
 }
 
@@ -623,7 +615,7 @@ async function exportHistoryCSV() {
     a.click();
     URL.revokeObjectURL(url);
   } catch (error) {
-    console.error('[Popup] 导出 CSV 错误:', error);
+    _err('[Popup] 导出 CSV 错误:', error);
   }
 }
 
@@ -639,7 +631,7 @@ async function clearHistory() {
     await chrome.runtime.sendMessage({ type: 'CLEAR_HISTORY' });
     renderHistory([]);
   } catch (error) {
-    console.error('[Popup] 清空错误:', error);
+    _err('[Popup] 清空错误:', error);
   }
 }
 
@@ -663,7 +655,7 @@ async function validateAllTokens() {
     chrome.runtime.onMessage.addListener(progressListener);
 
     const response = await chrome.runtime.sendMessage({ type: 'VALIDATE_ALL_TOKENS' });
-    console.log('[Popup] 验证结果:', response);
+    _log('[Popup] 验证结果:', response);
 
     // 移除进度监听器
     chrome.runtime.onMessage.removeListener(progressListener);
@@ -692,26 +684,11 @@ async function validateAllTokens() {
     }
 
   } catch (error) {
-    console.error('[Popup] 验证错误:', error);
+    _err('[Popup] 验证错误:', error);
     validateSection.classList.add('validate-result');
     validateText.textContent = '验证失败: ' + error.message;
   } finally {
     validateBtn.disabled = false;
-  }
-}
-
-// ==================== 邮箱渠道切换 ====================
-
-/**
- * 切换邮箱渠道显示
- */
-function switchMailProvider(provider) {
-  if (provider === 'gmail') {
-    gmailConfigDiv.style.display = 'block';
-    moemailConfigDiv.style.display = 'none';
-  } else {
-    gmailConfigDiv.style.display = 'none';
-    moemailConfigDiv.style.display = 'block';
   }
 }
 
@@ -722,7 +699,7 @@ function switchMailProvider(provider) {
  */
 async function loadMoemailConfig() {
   try {
-    const result = await chrome.storage.local.get(['moemailConfig', 'mailProvider']);
+    const result = await chrome.storage.local.get(['moemailConfig']);
     if (result.moemailConfig) {
       moemailConfig = result.moemailConfig;
       moemailApiUrlInput.value = moemailConfig.apiUrl || '';
@@ -732,12 +709,8 @@ async function loadMoemailConfig() {
         updateMoemailStatus(true);
       }
     }
-    if (result.mailProvider) {
-      mailProviderSelect.value = result.mailProvider;
-      switchMailProvider(result.mailProvider);
-    }
   } catch (error) {
-    console.error('[MoeMail] 加载配置错误:', error);
+    _err('[MoeMail] 加载配置错误:', error);
   }
 }
 
@@ -790,8 +763,10 @@ function updateMoemailStatus(saved) {
  */
 function switchProxyMode(mode) {
   proxyManualConfig.style.display = mode === 'manual' ? 'block' : 'none';
+  proxySocks5Config.style.display = mode === 'socks5' ? 'block' : 'none';
   proxyApiConfig.style.display = mode === 'api' ? 'block' : 'none';
   proxyPoolConfig.style.display = mode === 'pool' ? 'block' : 'none';
+  proxySubscriptionConfig.style.display = mode === 'subscription' ? 'block' : 'none';
 }
 
 /**
@@ -804,15 +779,19 @@ async function loadProxyConfig() {
       proxyConfig = result.proxyConfig;
       proxyModeSelect.value = proxyConfig.mode || 'none';
       proxyAddressInput.value = proxyConfig.address || '';
+      proxySocks5AddressInput.value = proxyConfig.address || '';
       proxyApiUrlInput.value = proxyConfig.apiUrl || '';
       proxyPoolList.value = proxyConfig.pool || '';
+      if (proxyConfig.subscriptionUrl) {
+        proxySubscriptionUrlInput.value = proxyConfig.subscriptionUrl;
+      }
       switchProxyMode(proxyConfig.mode);
       if (proxyConfig.mode !== 'none') {
         updateProxyStatus(true);
       }
     }
   } catch (error) {
-    console.error('[Proxy] 加载配置错误:', error);
+    _err('[Proxy] 加载配置错误:', error);
   }
 }
 
@@ -825,10 +804,14 @@ async function saveProxyConfig() {
 
   if (mode === 'manual') {
     proxyConfig.address = proxyAddressInput.value.trim();
+  } else if (mode === 'socks5') {
+    proxyConfig.address = proxySocks5AddressInput.value.trim();
   } else if (mode === 'api') {
     proxyConfig.apiUrl = proxyApiUrlInput.value.trim();
   } else if (mode === 'pool') {
     proxyConfig.pool = proxyPoolList.value.trim();
+  } else if (mode === 'subscription') {
+    proxyConfig.subscriptionUrl = proxySubscriptionUrlInput.value.trim();
   }
 
   try {
@@ -893,69 +876,50 @@ function updateProxyStatus(saved) {
     proxyStatus.textContent = '';
     return;
   }
-  const modeLabels = { manual: '手动代理', api: 'API 提取', pool: '代理池' };
+  const modeLabels = { manual: 'HTTP 代理', socks5: 'SOCKS5 代理', api: 'API 提取', pool: '代理池', subscription: '订阅' };
   proxyStatus.textContent = `✓ 模式: ${modeLabels[proxyConfig.mode] || proxyConfig.mode}`;
   proxyStatus.classList.remove('error');
 }
 
-// ==================== Gmail 配置功能 ====================
-
 /**
- * 加载 Gmail 配置
+ * 提取订阅节点
  */
-async function loadGmailConfig() {
+async function fetchSubscriptionNodes() {
+  const url = proxySubscriptionUrlInput.value.trim();
+  if (!url) {
+    proxyStatus.textContent = '请输入订阅链接';
+    proxyStatus.classList.add('error');
+    return;
+  }
+
+  proxySubscriptionFetchBtn.disabled = true;
+  proxySubscriptionFetchBtn.textContent = '提取中...';
+  proxySubscriptionInfo.style.display = 'none';
+
   try {
-    const result = await chrome.storage.local.get(['gmailAddress']);
-    if (result.gmailAddress) {
-      gmailAddress = result.gmailAddress;
-      gmailAddressInput.value = gmailAddress;
-      updateGmailStatus(true);
+    const response = await chrome.runtime.sendMessage({
+      type: 'FETCH_SUBSCRIPTION',
+      url
+    });
+
+    if (!response.success) {
+      throw new Error(response.error);
     }
-  } catch (error) {
-    console.error('[Gmail] 加载配置错误:', error);
-  }
-}
 
-/**
- * 保存 Gmail 配置
- */
-async function saveGmailConfig() {
-  const email = gmailAddressInput.value.trim();
-  
-  if (!email) {
-    gmailStatus.textContent = '请输入邮箱地址';
-    gmailStatus.classList.add('error');
-    return;
-  }
-  
-  // 验证邮箱格式
-  if (!email.includes('@')) {
-    gmailStatus.textContent = '邮箱格式无效';
-    gmailStatus.classList.add('error');
-    return;
-  }
-  
-  try {
-    gmailAddress = email;
-    await chrome.storage.local.set({ gmailAddress: email });
-    updateGmailStatus(true);
-  } catch (error) {
-    console.error('[Gmail] 保存配置错误:', error);
-    gmailStatus.textContent = '保存失败: ' + error.message;
-    gmailStatus.classList.add('error');
-  }
-}
+    proxyConfig.subscriptionUrl = url;
+    proxyConfig.mode = 'subscription';
+    await chrome.storage.local.set({ proxyConfig });
 
-/**
- * 更新 Gmail 状态显示
- */
-function updateGmailStatus(saved) {
-  if (saved && gmailAddress) {
-    gmailStatus.textContent = `✓ 已配置: ${gmailAddress}`;
-    gmailStatus.classList.remove('error');
-  } else {
-    gmailStatus.textContent = '';
-    gmailStatus.classList.remove('error');
+    proxySubscriptionInfo.textContent = `✓ 已提取 ${response.count} 个节点`;
+    proxySubscriptionInfo.style.display = 'block';
+    proxyStatus.textContent = `✓ 订阅: ${response.count} 个节点`;
+    proxyStatus.classList.remove('error');
+  } catch (error) {
+    proxyStatus.textContent = '订阅提取失败: ' + error.message;
+    proxyStatus.classList.add('error');
+  } finally {
+    proxySubscriptionFetchBtn.disabled = false;
+    proxySubscriptionFetchBtn.textContent = '提取';
   }
 }
 
@@ -973,7 +937,7 @@ async function loadPoolConfig() {
       await connectToPool();
     }
   } catch (error) {
-    console.error('[Pool] 加载配置错误:', error);
+    _err('[Pool] 加载配置错误:', error);
   }
 }
 
@@ -1014,7 +978,7 @@ async function connectToPool() {
     updatePoolUI();
 
   } catch (error) {
-    console.error('[Pool] 连接错误:', error);
+    _err('[Pool] 连接错误:', error);
     alert('连接失败: ' + error.message);
   } finally {
     poolConnectBtn.disabled = false;
@@ -1125,7 +1089,7 @@ async function uploadToPool() {
     alert(message);
 
   } catch (error) {
-    console.error('[Pool] 上传错误:', error);
+    _err('[Pool] 上传错误:', error);
     alert('上传失败: ' + error.message);
   } finally {
     poolUploadBtn.disabled = false;
@@ -1144,11 +1108,8 @@ async function init() {
       updateUI(response.state);
     }
   } catch (error) {
-    console.error('[Popup] 获取状态错误:', error);
+    _err('[Popup] 获取状态错误:', error);
   }
-
-  // 加载 Gmail 配置
-  await loadGmailConfig();
 
   // 加载 MoeMail 配置
   await loadMoemailConfig();
@@ -1175,20 +1136,6 @@ async function init() {
   clearBtn.addEventListener('click', clearHistory);
   validateBtn.addEventListener('click', validateAllTokens);
 
-  // Gmail 配置事件
-  gmailSaveBtn.addEventListener('click', saveGmailConfig);
-  gmailAddressInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') {
-      saveGmailConfig();
-    }
-  });
-
-  // 邮箱渠道切换事件
-  mailProviderSelect.addEventListener('change', (e) => {
-    switchMailProvider(e.target.value);
-    chrome.storage.local.set({ mailProvider: e.target.value });
-  });
-
   // MoeMail 配置事件
   moemailSaveBtn.addEventListener('click', saveMoemailConfig);
 
@@ -1200,8 +1147,10 @@ async function init() {
     updateProxyStatus(e.target.value !== 'none');
   });
   proxySaveBtn.addEventListener('click', saveProxyConfig);
+  proxySocks5SaveBtn.addEventListener('click', saveProxyConfig);
   proxyFetchBtn.addEventListener('click', fetchProxiesFromApi);
   proxyPoolSaveBtn.addEventListener('click', saveProxyConfig);
+  proxySubscriptionFetchBtn.addEventListener('click', fetchSubscriptionNodes);
 
   // Token Pool 事件
   poolConnectBtn.addEventListener('click', connectToPool);

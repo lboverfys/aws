@@ -3,16 +3,40 @@
  * 管理注册状态和流程控制，支持多窗口并发注册
  */
 
-import { GmailAliasClient } from '../lib/mail-api.js';
 import { MoeMailClient } from '../lib/moemail-api.js';
-import { AWSDeviceAuth, validateToken, refreshAndValidateToken } from '../lib/oidc-api.js';
+import { AWSDeviceAuth, validateToken, refreshAndValidateToken, resetSessionUA } from '../lib/oidc-api.js';
 import { generatePassword, generateName, generateEmailPrefix } from '../lib/utils.js';
 import { generateFingerprintConfig } from '../lib/fingerprint.js';
 import { applyFingerprint } from '../content/fingerprint-inject.js';
 import { ProxyManager } from '../lib/proxy-manager.js';
+import { fetchSubscription } from '../lib/subscription-parser.js';
+import { generateXrayConfig, generateSocks5XrayConfig } from '../lib/xray-config-generator.js';
 
-// Gmail 配置
-let gmailBaseAddress = '';
+// ============== 调试开关 & 日志包装 ==============
+const DEBUG = false;
+/* eslint-disable no-console */
+function log(...args) { if (DEBUG) console.log(...args); }
+function warn(...args) { if (DEBUG) console.warn(...args); }
+function err(...args) { if (DEBUG) console.error(...args); }
+/* eslint-enable no-console */
+
+// ============== 凭据混淆 ==============
+const _OBF_PREFIX = 'obf:';
+function obfuscate(plain) {
+  if (!plain) return plain;
+  try {
+    return _OBF_PREFIX + btoa(plain.split('').reverse().join(''));
+  } catch { return plain; }
+}
+function deobfuscate(encoded) {
+  if (!encoded || !encoded.startsWith(_OBF_PREFIX)) return encoded;
+  try {
+    return atob(encoded.slice(_OBF_PREFIX.length)).split('').reverse().join('');
+  } catch { return encoded; }
+}
+
+// ============== 代理锁 ==============
+let proxyLock = Promise.resolve();
 
 // MoeMail 配置
 let moemailConfig = { apiUrl: '', apiKey: '', domain: '' };
@@ -20,8 +44,11 @@ let moemailConfig = { apiUrl: '', apiKey: '', domain: '' };
 // 代理配置
 let proxyConfigData = { mode: 'none', address: '', apiUrl: '', pool: '' };
 
+// 订阅节点缓存
+let subscriptionNodes = [];
+
 // 邮箱渠道
-let mailProvider = 'gmail';
+let mailProvider = 'moemail';
 
 // 代理管理器
 const proxyManager = new ProxyManager();
@@ -77,14 +104,14 @@ function waitForTabLoad(tabId, timeout = 30000) {
     const checkTab = async () => {
       try {
         const tab = await chrome.tabs.get(tabId);
-        console.log(`[waitForTabLoad] tabId=${tabId}, status=${tab.status}, url=${tab.url}`);
+        log(`[waitForTabLoad] tabId=${tabId}, status=${tab.status}, url=${tab.url}`);
 
         if (tab.status === 'complete') {
           resolve(tab);
           return;
         }
       } catch (e) {
-        console.error(`[waitForTabLoad] tabId=${tabId} 获取失败:`, e);
+        err(`[waitForTabLoad] tabId=${tabId} 获取失败:`, e);
         reject(new Error('标签页已关闭或不存在'));
         return;
       }
@@ -129,9 +156,10 @@ function getPublicState() {
     status: globalState.status,
     step: globalState.step,
     error: globalState.error,
-    totalTarget: globalState.totalTarget,
+    totalTarget: globalState.totalTarget === Infinity ? 0 : globalState.totalTarget,
     totalRegistered: globalState.totalRegistered,
     totalFailed: globalState.totalFailed,
+    infiniteMode: globalState.infiniteMode || false,
     lastSuccess: globalState.lastSuccess,
     sessions: Array.from(sessions.values()).map(s => ({
       id: s.id,
@@ -183,7 +211,7 @@ function createSession() {
     // 邮箱客户端
     mailClient: null,
     mailAccessKey: null,
-    manualVerification: true, // true=Gmail(手动), false=MoeMail(自动)
+    manualVerification: false, // MoeMail 自动获取验证码
     // OIDC 客户端
     oidcClient: null,
     oidcAuth: null,
@@ -217,13 +245,12 @@ async function destroySession(sessionId) {
     }
   }
 
-  // Gmail 别名模式不需要删除邮箱
-  // MoeMail 模式需要清理临时邮箱
+  // MoeMail 模式清理临时邮箱
   if (session.mailClient && session.mailClient instanceof MoeMailClient) {
     try {
       await session.mailClient.deleteInbox();
     } catch (e) {
-      console.warn(`[Session ${session.id}] MoeMail 邮箱清理失败:`, e.message);
+      warn(`[Session ${session.id}] MoeMail 邮箱清理失败:`, e.message);
     }
   }
   session.mailClient = null;
@@ -252,8 +279,8 @@ async function withApiLock(fn) {
   try {
     return await fn();
   } finally {
-    // API 调用后延迟一小段时间再释放锁
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // API 调用后延迟随机时间再释放锁，避免固定节奏
+    await new Promise(resolve => setTimeout(resolve, 3000 + Math.random() * 5000));
     releaseLock();
   }
 }
@@ -267,6 +294,9 @@ async function runSessionRegistration(session) {
     session.pollAbort = false;
     updateSession(session.id, { step: '初始化...' });
 
+    // 重置 OIDC UA，每个会话使用不同的版本号
+    resetSessionUA();
+
     // 步骤 1: 生成账号信息（先生成，用于邮箱前缀）
     updateSession(session.id, { step: '生成账号信息...' });
     const { firstName, lastName } = generateName();
@@ -275,56 +305,32 @@ async function runSessionRegistration(session) {
     session.lastName = lastName;
     session.password = password;
 
-    // 步骤 2: 生成邮箱（按渠道分支）
-    updateSession(session.id, { step: '生成邮箱...' });
-
-    if (mailProvider === 'moemail') {
-      // MoeMail 模式：创建临时邮箱
-      if (!moemailConfig.apiUrl || !moemailConfig.apiKey) {
-        throw new Error('未配置 MoeMail，请在插件设置中配置 API 地址和 Key');
-      }
-      session.mailClient = new MoeMailClient({
-        apiUrl: moemailConfig.apiUrl,
-        apiKey: moemailConfig.apiKey,
-        domain: moemailConfig.domain,
-      });
-      const email = await session.mailClient.createInbox();
-      session.email = email;
-      session.manualVerification = false; // MoeMail 自动获取验证码
-      updateSession(session.id, { email });
-    } else {
-      // Gmail 别名模式
-      if (!gmailBaseAddress) {
-        throw new Error('未配置 Gmail 地址，请在插件设置中配置');
-      }
-      session.mailClient = new GmailAliasClient({ baseEmail: gmailBaseAddress });
-      const nameSuffix = `${firstName.toLowerCase()}${lastName.toLowerCase()}`.slice(0, 8);
-      const email = await session.mailClient.createInbox({
-        prefix: nameSuffix,
-        mode: 'auto'
-      });
-      session.email = email;
-      session.manualVerification = true; // Gmail 需要手动输入验证码
-      updateSession(session.id, { email });
-    }
-
-    console.log(`[Session ${session.id}] 账号信息:`, { email: session.email, firstName, lastName });
-
-    // 步骤 3: 获取 OIDC 授权 URL（使用 API 锁）
-    updateSession(session.id, { step: '获取授权链接...' });
-    session.oidcClient = new AWSDeviceAuth();
-    const authInfo = await withApiLock(() => session.oidcClient.quickAuth());
-    session.oidcAuth = authInfo;
-
-    console.log(`[Session ${session.id}] OIDC 授权信息:`, authInfo.verificationUriComplete);
-
-    // 步骤 4: 设置代理（如果配置了）
+    // 步骤 2: 设置代理（必须在邮箱创建和 OIDC 调用之前，确保所有请求都走代理）
     let currentProxy = null;
     if (proxyConfigData.mode !== 'none') {
+      // 代理锁：确保并发会话串行使用代理
+      await proxyLock;
+      let releaseProxyLock;
+      proxyLock = new Promise(resolve => { releaseProxyLock = resolve; });
+
       updateSession(session.id, { step: '设置代理...' });
       try {
         if (proxyConfigData.mode === 'manual') {
           currentProxy = proxyManager.parseProxy(proxyConfigData.address);
+        } else if (proxyConfigData.mode === 'socks5') {
+          // socks5 模式：强制使用 socks5 协议
+          const parsed = proxyManager.parseProxy(proxyConfigData.address, 'socks5');
+          if (parsed && parsed.username && parsed.password) {
+            // SOCKS5 带认证：Chrome 无法原生处理 SOCKS5 认证，通过 xray 本地转发
+            const xrayConfig = generateSocks5XrayConfig(parsed, 0);
+            updateSession(session.id, { step: `启动 SOCKS5 代理: ${parsed.host}:${parsed.port}...` });
+            const localPort = await proxyManager.startSubscriptionProxy(session.id, xrayConfig);
+            currentProxy = { scheme: 'socks5', host: '127.0.0.1', port: localPort, username: '', password: '' };
+            log(`[Session ${session.id}] SOCKS5 代理已启动 (xray): ${parsed.host}:${parsed.port} -> 127.0.0.1:${localPort}`);
+          } else {
+            // SOCKS5 无认证：直接使用 PAC 脚本
+            currentProxy = parsed;
+          }
         } else if (proxyConfigData.mode === 'api') {
           // 从 API 提取代理列表（如果池为空）
           if (proxyManager.proxyPool.length === 0 && proxyConfigData.apiUrl) {
@@ -340,28 +346,92 @@ async function runSessionRegistration(session) {
             proxyManager.setPool(proxies);
           }
           currentProxy = proxyManager.getNextProxy();
+        } else if (proxyConfigData.mode === 'subscription') {
+          // 订阅模式：随机选节点 → 启动 xray → 拿到本地端口
+          if (subscriptionNodes.length === 0) {
+            throw new Error('订阅节点列表为空，请先提取订阅');
+          }
+          const nodeIndex = Math.floor(Math.random() * subscriptionNodes.length);
+          const node = subscriptionNodes[nodeIndex];
+          const xrayConfig = generateXrayConfig(node, 0); // 端口由 native host 分配
+          updateSession(session.id, { step: `启动代理: ${node.name || node.host}...` });
+          const localPort = await proxyManager.startSubscriptionProxy(session.id, xrayConfig);
+          currentProxy = { scheme: 'socks5', host: '127.0.0.1', port: localPort, username: '', password: '' };
+          log(`[Session ${session.id}] 订阅代理已启动: ${node.name || node.host} -> 127.0.0.1:${localPort}`);
         }
 
         if (currentProxy) {
           await proxyManager.applyProxy(currentProxy);
-          console.log(`[Session ${session.id}] 代理已设置: ${currentProxy.host}:${currentProxy.port}`);
+          // 等待代理生效
+          await new Promise(resolve => setTimeout(resolve, 300));
+          log(`[Session ${session.id}] 代理已设置: ${currentProxy.host}:${currentProxy.port}`);
         }
       } catch (e) {
-        console.warn(`[Session ${session.id}] 代理设置失败:`, e.message);
+        warn(`[Session ${session.id}] 代理设置失败:`, e.message);
         // 代理失败不中断注册流程
+      } finally {
+        releaseProxyLock();
       }
     }
 
-    // 步骤 5: 生成指纹配置（在打开窗口前，结合代理 IP 地理位置）
+    // 步骤 3: 生成邮箱（代理已生效，邮箱 API 请求也走代理）
+    updateSession(session.id, { step: '生成邮箱...' });
+
+    // MoeMail 模式：创建临时邮箱
+    if (!moemailConfig.apiUrl || !moemailConfig.apiKey) {
+      throw new Error('未配置 MoeMail，请在插件设置中配置 API 地址和 Key');
+    }
+    session.mailClient = new MoeMailClient({
+      apiUrl: moemailConfig.apiUrl,
+      apiKey: moemailConfig.apiKey,
+      domain: moemailConfig.domain,
+    });
+    const email = await session.mailClient.createInbox();
+    session.email = email;
+    session.manualVerification = false; // MoeMail 自动获取验证码
+    updateSession(session.id, { email });
+
+    log(`[Session ${session.id}] 账号信息:`, { email: session.email, firstName, lastName });
+
+    // 步骤 4: 获取 OIDC 授权 URL（代理已生效，所有 API 请求走代理 IP）
+    updateSession(session.id, { step: '获取授权链接...' });
+    session.oidcClient = new AWSDeviceAuth();
+    const authInfo = await withApiLock(() => session.oidcClient.quickAuth());
+    session.oidcAuth = authInfo;
+
+    log(`[Session ${session.id}] OIDC 授权信息:`, authInfo.verificationUriComplete);
+
+    // 步骤 5: 生成指纹配置（结合代理 IP 地理位置）
     let geoInfo = null;
     if (currentProxy) {
       updateSession(session.id, { step: '查询 IP 地理位置...' });
       geoInfo = await proxyManager.getGeoLocation(currentProxy.host);
     }
     session.fingerprintConfig = generateFingerprintConfig(undefined, geoInfo);
-    console.log(`[Session ${session.id}] 指纹配置:`, session.fingerprintConfig.navigator.platform, session.fingerprintConfig.screen.width + 'x' + session.fingerprintConfig.screen.height, '时区:', session.fingerprintConfig.timezone.name);
+    log(`[Session ${session.id}] 指纹配置:`, session.fingerprintConfig.navigator.platform, session.fingerprintConfig.screen.width + 'x' + session.fingerprintConfig.screen.height, '时区:', session.fingerprintConfig.timezone.name);
 
-    // 步骤 6: 打开无痕窗口（使用锁防止同时创建多个窗口）
+    // 步骤 6: 清除无痕模式 Cookie（防止会话间 Cookie 关联）
+    updateSession(session.id, { step: '清理会话痕迹...' });
+    try {
+      const awsDomains = [
+        '.amazonaws.com', '.aws.amazon.com', '.signin.aws',
+        '.awsapps.com', 'oidc.us-east-1.amazonaws.com'
+      ];
+      for (const domain of awsDomains) {
+        const cookies = await chrome.cookies.getAll({ domain, storeId: '1' }).catch(() => []);
+        for (const cookie of cookies) {
+          await chrome.cookies.remove({
+            url: `https://${cookie.domain.replace(/^\./, '')}${cookie.path}`,
+            name: cookie.name,
+            storeId: cookie.storeId
+          }).catch(() => {});
+        }
+      }
+    } catch (_) {
+      // Cookie 清理失败不中断流程
+    }
+
+    // 步骤 7: 打开无痕窗口（使用锁防止同时创建多个窗口）
     updateSession(session.id, { step: '打开无痕窗口...' });
 
     // 等待获取窗口创建锁
@@ -370,15 +440,21 @@ async function runSessionRegistration(session) {
     windowCreationLock = new Promise(resolve => { releaseLock = resolve; });
 
     try {
-      console.log(`[Session ${session.id}] 准备创建无痕窗口，URL:`, authInfo.verificationUriComplete);
+      log(`[Session ${session.id}] 准备创建无痕窗口，URL:`, authInfo.verificationUriComplete);
 
       // 先创建空白窗口，避免首次请求泄露真实 HTTP 头
+      const fpScreen = session.fingerprintConfig.screen;
+      // 窗口尺寸加入随机偏移，避免固定计算公式被关联
+      const widthOffset = 150 + Math.floor(Math.random() * 200); // 150-350
+      const heightOffset = 80 + Math.floor(Math.random() * 150);  // 80-230
+      const winWidth = Math.min(fpScreen.width - widthOffset, 1366);
+      const winHeight = Math.min(fpScreen.height - heightOffset, 900);
       const window = await chrome.windows.create({
         url: 'about:blank',
         incognito: true,
         focused: true,
-        width: 600,
-        height: 800
+        width: winWidth,
+        height: winHeight
       });
 
       // 检查窗口和标签页
@@ -399,28 +475,28 @@ async function runSessionRegistration(session) {
 
       // 先注册指纹和 HTTP 头规则，确保首次真实请求就被伪装
       registerTabFingerprint(session.tabId, session.fingerprintConfig);
-      // 等待 declarativeNetRequest 规则生效
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // 等待 declarativeNetRequest 规则生效（需要足够时间，否则首个请求泄露真实头）
+      await new Promise(resolve => setTimeout(resolve, 500));
 
       // 规则就绪后再导航到目标 URL
       await chrome.tabs.update(session.tabId, { url: authInfo.verificationUriComplete });
-      console.log(`[Session ${session.id}] 无痕窗口创建成功: windowId=${window.id}, tabId=${session.tabId}`);
+      log(`[Session ${session.id}] 无痕窗口创建成功: windowId=${window.id}, tabId=${session.tabId}`);
 
       // 等待页面加载完成
       updateSession(session.id, { step: '等待页面加载...' });
       try {
         await waitForTabLoad(session.tabId, 30000);
-        console.log(`[Session ${session.id}] 页面已加载`);
+        log(`[Session ${session.id}] 页面已加载`);
       } catch (e) {
-        console.warn(`[Session ${session.id}] 等待页面加载:`, e.message);
+        warn(`[Session ${session.id}] 等待页面加载:`, e.message);
         // 即使超时也继续，content script 会处理
       }
 
-      // 额外等待一小段时间让 content script 初始化
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // 额外等待随机时间让 content script 初始化
+      await new Promise(resolve => setTimeout(resolve, 800 + Math.random() * 1500));
 
     } catch (error) {
-      console.error(`[Session ${session.id}] 创建无痕窗口错误:`, error);
+      err(`[Session ${session.id}] 创建无痕窗口错误:`, error);
 
       // 根据错误类型给出详细提示
       let errorMsg = '创建无痕窗口失败';
@@ -464,7 +540,7 @@ async function runSessionRegistration(session) {
         token: {
           ...tokenResult,
           clientId: session.oidcAuth?.clientId || '',
-          clientSecret: session.oidcAuth?.clientSecret || ''
+          clientSecret: obfuscate(session.oidcAuth?.clientSecret || '')
         }
       };
 
@@ -474,7 +550,7 @@ async function runSessionRegistration(session) {
     }
 
   } catch (error) {
-    console.error(`[Session ${session.id}] 注册失败:`, error);
+    err(`[Session ${session.id}] 注册失败:`, error);
     session.status = 'error';
     session.error = error.message;
     updateSession(session.id, { step: '失败: ' + error.message });
@@ -497,6 +573,11 @@ async function runSessionRegistration(session) {
     // 清除代理
     if (proxyConfigData.mode !== 'none') {
       await proxyManager.clearProxy();
+    }
+
+    // 停止订阅代理 / SOCKS5 xray 实例
+    if (proxyConfigData.mode === 'subscription' || proxyConfigData.mode === 'socks5') {
+      await proxyManager.stopSubscriptionProxy(session.id);
     }
 
     // MoeMail 模式清理临时邮箱
@@ -525,12 +606,12 @@ async function pollSessionToken(session) {
     try {
       const result = await session.oidcClient.getToken();
       if (result) {
-        console.log(`[Session ${session.id}] Token 获取成功`);
+        log(`[Session ${session.id}] Token 获取成功`);
         return result;
       }
     } catch (error) {
       if (!error.message.includes('authorization_pending')) {
-        console.error(`[Session ${session.id}] Token 轮询错误:`, error);
+        err(`[Session ${session.id}] Token 轮询错误:`, error);
       }
     }
 
@@ -549,7 +630,7 @@ function saveToHistory(session, success) {
     tokenInfo = {
       ...session.token,
       clientId: session.oidcAuth?.clientId || '',
-      clientSecret: session.oidcAuth?.clientSecret || ''
+      clientSecret: obfuscate(session.oidcAuth?.clientSecret || '')
     };
   }
 
@@ -598,8 +679,8 @@ async function validateAllTokens() {
     return results;
   }
 
-  // 并发验证（每批 5 个）
-  const concurrency = 5;
+  // 并发验证（每批 2 个，降低限流风险）
+  const concurrency = 2;
   let validated = 0;
 
   // 通知开始验证
@@ -615,10 +696,10 @@ async function validateAllTokens() {
     const batchResults = await Promise.allSettled(
       batch.map(async (record) => {
         try {
-          // 使用刷新并验证的方法
+          // 使用刷新并验证的方法（deobfuscate clientSecret）
           const result = await refreshAndValidateToken({
             clientId: record.token.clientId,
-            clientSecret: record.token.clientSecret,
+            clientSecret: deobfuscate(record.token.clientSecret),
             refreshToken: record.token.refreshToken
           });
 
@@ -696,7 +777,7 @@ async function validateAllTokens() {
 
     // 批次间延迟，避免限流
     if (i + concurrency < recordsToValidate.length) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 3000 + Math.random() * 3000));
     }
   }
 
@@ -712,29 +793,30 @@ async function validateAllTokens() {
 /**
  * 开始批量注册
  */
-async function startBatchRegistration(loopCount, concurrency, gmailAddress, options = {}) {
+async function startBatchRegistration(loopCount, concurrency, options = {}) {
   if (isRunning) {
     return { success: false, error: '已有注册任务在运行' };
   }
 
   // 设置邮箱渠道
-  mailProvider = options.mailProvider || 'gmail';
+  mailProvider = 'moemail';
 
-  if (mailProvider === 'gmail') {
-    if (!gmailAddress) {
-      return { success: false, error: '未配置 Gmail 地址' };
-    }
-    gmailBaseAddress = gmailAddress;
-  } else if (mailProvider === 'moemail') {
-    if (!options.moemailApiUrl || !options.moemailApiKey) {
-      return { success: false, error: '未配置 MoeMail API 地址或 Key' };
-    }
-    moemailConfig = {
-      apiUrl: options.moemailApiUrl,
-      apiKey: options.moemailApiKey,
-      domain: options.moemailDomain || '',
-    };
+  // 使用代理时强制并发为 1，因为 chrome.proxy.settings 是全局的，
+  // 并发会导致多个会话互相覆盖代理设置，造成 IP/指纹不匹配
+  const proxyMode = options.proxyMode || 'none';
+  if (proxyMode !== 'none' && concurrency > 1) {
+    warn('[Service Worker] 使用代理时强制并发为 1，避免代理冲突');
+    concurrency = 1;
   }
+
+  if (!options.moemailApiUrl || !options.moemailApiKey) {
+    return { success: false, error: '未配置 MoeMail API 地址或 Key' };
+  }
+  moemailConfig = {
+    apiUrl: options.moemailApiUrl,
+    apiKey: options.moemailApiKey,
+    domain: options.moemailDomain || '',
+  };
 
   // 设置代理配置
   proxyConfigData = {
@@ -742,6 +824,7 @@ async function startBatchRegistration(loopCount, concurrency, gmailAddress, opti
     address: options.proxyAddress || '',
     apiUrl: options.proxyApiUrl || '',
     pool: options.proxyPool || '',
+    subscriptionUrl: options.proxySubscriptionUrl || '',
   };
 
   // 如果使用 API 代理模式，预先提取代理列表
@@ -750,54 +833,78 @@ async function startBatchRegistration(loopCount, concurrency, gmailAddress, opti
       const proxies = await proxyManager.fetchFromApi(proxyConfigData.apiUrl);
       proxyManager.setPool(proxies);
     } catch (e) {
-      console.warn('[Service Worker] 代理 API 提取失败:', e.message);
+      warn('[Service Worker] 代理 API 提取失败:', e.message);
     }
   } else if (proxyConfigData.mode === 'pool' && proxyConfigData.pool) {
     const lines = proxyConfigData.pool.split(/[\r\n]+/).filter(l => l.trim());
     const proxies = lines.map(l => proxyManager.parseProxy(l)).filter(Boolean);
     proxyManager.setPool(proxies);
+  } else if (proxyConfigData.mode === 'subscription' && proxyConfigData.subscriptionUrl) {
+    // 订阅模式：获取并解析节点
+    try {
+      subscriptionNodes = await fetchSubscription(proxyConfigData.subscriptionUrl);
+      log(`[Service Worker] 订阅解析成功: ${subscriptionNodes.length} 个节点`);
+      if (subscriptionNodes.length === 0) {
+        return { success: false, error: '订阅链接未返回有效节点' };
+      }
+    } catch (e) {
+      warn('[Service Worker] 订阅解析失败:', e.message);
+      return { success: false, error: '订阅解析失败: ' + e.message };
+    }
   }
 
   isRunning = true;
   shouldStop = false;
+
+  // loopCount = 0 表示无限循环，直到手动停止
+  const infiniteMode = loopCount === 0;
 
   // 重置状态
   globalState = {
     status: 'running',
     step: '开始注册...',
     error: null,
-    totalTarget: loopCount,
+    totalTarget: infiniteMode ? Infinity : loopCount,
     totalRegistered: 0,
     totalFailed: 0,
     concurrency: concurrency,
-    lastSuccess: null
+    lastSuccess: null,
+    infiniteMode: infiniteMode,
   };
 
   sessions.clear();
   broadcastState();
 
-  console.log(`[Service Worker] 开始批量注册: 目标=${loopCount}, 并发=${concurrency}, 邮箱渠道=${mailProvider}, 代理=${proxyConfigData.mode}`);
+  log(`[Service Worker] 开始批量注册: 目标=${infiniteMode ? '无限' : loopCount}, 并发=${concurrency}, 邮箱渠道=${mailProvider}, 代理=${proxyConfigData.mode}`);
 
-  // 创建任务队列
+  // 创建任务队列（无限模式不预填队列，由 worker 自行循环）
   taskQueue = [];
-  for (let i = 0; i < loopCount; i++) {
-    taskQueue.push(i);
+  if (!infiniteMode) {
+    for (let i = 0; i < loopCount; i++) {
+      taskQueue.push(i);
+    }
   }
 
   // 并发执行
   const workers = [];
   for (let i = 0; i < concurrency; i++) {
-    workers.push(runWorker(i));
+    workers.push(runWorker(i, infiniteMode));
   }
 
   await Promise.all(workers);
+
+  // 清理订阅代理 / SOCKS5 xray 实例
+  if (proxyConfigData.mode === 'subscription' || proxyConfigData.mode === 'socks5') {
+    await proxyManager.stopAllSubscriptionProxies();
+    proxyManager.disconnectNativeHost();
+  }
 
   // 完成
   isRunning = false;
   globalState.status = shouldStop ? 'idle' : 'completed';
   globalState.step = shouldStop
     ? `已停止，成功 ${globalState.totalRegistered} 个`
-    : `完成！成功 ${globalState.totalRegistered}/${loopCount} 个`;
+    : `完成！成功 ${globalState.totalRegistered}/${infiniteMode ? '∞' : loopCount} 个`;
 
   broadcastState();
 
@@ -807,20 +914,27 @@ async function startBatchRegistration(loopCount, concurrency, gmailAddress, opti
 /**
  * 工作线程 - 从队列取任务执行
  */
-async function runWorker(workerId) {
-  console.log(`[Worker ${workerId}] 启动`);
+async function runWorker(workerId, infiniteMode = false) {
+  log(`[Worker ${workerId}] 启动, 无限模式=${infiniteMode}`);
 
   // 错开启动时间，避免同时创建窗口和调用 API
   // 第一个 worker 立即启动，后续 worker 等待更长时间
   if (workerId > 0) {
-    await new Promise(resolve => setTimeout(resolve, workerId * 3000));
+    await new Promise(resolve => setTimeout(resolve, workerId * (2000 + Math.random() * 3000)));
   }
 
-  while (!shouldStop && taskQueue.length > 0) {
-    const taskIndex = taskQueue.shift();
-    if (taskIndex === undefined) break;
+  let taskCounter = 0;
 
-    console.log(`[Worker ${workerId}] 执行任务 #${taskIndex + 1}`);
+  while (!shouldStop) {
+    // 有限模式：从队列取任务，队列空则退出
+    if (!infiniteMode) {
+      const taskIndex = taskQueue.shift();
+      if (taskIndex === undefined) break;
+      taskCounter = taskIndex;
+    }
+
+    taskCounter++;
+    log(`[Worker ${workerId}] 执行任务 #${taskCounter}`);
 
     // 清理已完成的旧会话，只保留活跃的
     for (const [id, s] of sessions) {
@@ -833,8 +947,9 @@ async function runWorker(workerId) {
     const session = createSession();
 
     const done = globalState.totalRegistered + globalState.totalFailed;
+    const targetLabel = infiniteMode ? '∞' : globalState.totalTarget;
     updateGlobalState({
-      step: `进度 ${done}/${globalState.totalTarget}，正在注册第 ${taskIndex + 1} 个...`
+      step: `进度 ${done}/${targetLabel}，正在注册第 ${taskCounter} 个...`
     });
 
     // 执行注册
@@ -843,23 +958,24 @@ async function runWorker(workerId) {
     // 更新全局进度
     const doneAfter = globalState.totalRegistered + globalState.totalFailed;
     updateGlobalState({
-      step: `进度 ${doneAfter}/${globalState.totalTarget}`
+      step: `进度 ${doneAfter}/${targetLabel}`
     });
 
-    // 任务间延迟
-    if (!shouldStop && taskQueue.length > 0) {
-      await new Promise(resolve => setTimeout(resolve, 2000));
+    // 任务间延迟（随机化，避免固定节奏）
+    const hasMore = infiniteMode ? !shouldStop : taskQueue.length > 0;
+    if (!shouldStop && hasMore) {
+      await new Promise(resolve => setTimeout(resolve, 2500 + Math.random() * 2500));
     }
   }
 
-  console.log(`[Worker ${workerId}] 结束`);
+  log(`[Worker ${workerId}] 结束`);
 }
 
 /**
  * 停止注册
  */
 function stopRegistration() {
-  console.log('[Service Worker] 停止注册');
+  log('[Service Worker] 停止注册');
   shouldStop = true;
   taskQueue = [];
 
@@ -911,47 +1027,31 @@ function findSessionByWindowId(windowId) {
 }
 
 /**
- * 获取验证码
- * MoeMail 模式：自动从 API 获取
- * Gmail 模式：等待用户手动输入
+ * 获取验证码（MoeMail 自动获取）
  */
 async function getVerificationCode(session) {
   if (!session) {
     return { success: false, error: '会话未初始化' };
   }
 
-  // MoeMail 模式：自动获取验证码
-  if (!session.manualVerification && session.mailClient && session.mailClient instanceof MoeMailClient) {
-    console.log(`[Session ${session.id}] MoeMail 模式，自动获取验证码...`);
-    updateSession(session.id, { step: '等待验证码...' });
+  if (!session.mailClient || !(session.mailClient instanceof MoeMailClient)) {
+    return { success: false, error: 'MoeMail 客户端未初始化' };
+  }
 
-    try {
-      const code = await session.mailClient.waitForVerificationCode(120000);
-      if (code) {
-        console.log(`[Session ${session.id}] MoeMail 验证码: ${code}`);
-        return { success: true, code };
-      } else {
-        return { success: false, error: 'MoeMail 验证码获取超时' };
-      }
-    } catch (e) {
-      return { success: false, error: 'MoeMail 验证码获取失败: ' + e.message };
+  log(`[Session ${session.id}] MoeMail 模式，自动获取验证码...`);
+  updateSession(session.id, { step: '等待验证码...' });
+
+  try {
+    const code = await session.mailClient.waitForVerificationCode(120000);
+    if (code) {
+      log(`[Session ${session.id}] MoeMail 验证码: ${code}`);
+      return { success: true, code };
+    } else {
+      return { success: false, error: 'MoeMail 验证码获取超时' };
     }
+  } catch (e) {
+    return { success: false, error: 'MoeMail 验证码获取失败: ' + e.message };
   }
-
-  // Gmail 别名模式下，需要用户手动输入验证码
-  console.log(`[Session ${session.id}] Gmail 别名模式，等待用户手动输入验证码`);
-
-  // 如果会话中已经有验证码（用户已输入），则返回
-  if (session.verificationCode) {
-    return { success: true, code: session.verificationCode };
-  }
-
-  // 返回需要手动输入的标记
-  return {
-    success: false,
-    needManualInput: true,
-    error: '请从 Gmail 收件箱获取验证码并手动填写'
-  };
 }
 
 /**
@@ -963,11 +1063,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const session = senderWindowId ? findSessionByWindowId(senderWindowId) : null;
 
   if (sender.tab) {
-    console.log('[Service Worker] 收到消息:', message.type,
+    log('[Service Worker] 收到消息:', message.type,
       'tabId:', sender.tab.id, 'windowId:', senderWindowId,
       'session:', session?.id || 'none');
   } else {
-    console.log('[Service Worker] 收到消息:', message.type, '(popup)');
+    log('[Service Worker] 收到消息:', message.type, '(popup)');
   }
 
   switch (message.type) {
@@ -976,8 +1076,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case 'START_BATCH_REGISTRATION':
-      startBatchRegistration(message.loopCount || 1, message.concurrency || 1, message.gmailAddress, {
-        mailProvider: message.mailProvider,
+      startBatchRegistration(typeof message.loopCount === 'number' ? message.loopCount : 1, message.concurrency || 1, {
         moemailApiUrl: message.moemailApiUrl,
         moemailApiKey: message.moemailApiKey,
         moemailDomain: message.moemailDomain,
@@ -985,6 +1084,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         proxyAddress: message.proxyAddress,
         proxyApiUrl: message.proxyApiUrl,
         proxyPool: message.proxyPool,
+        proxySubscriptionUrl: message.proxySubscriptionUrl,
       }).then(sendResponse);
       return true;
 
@@ -998,14 +1098,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         getVerificationCode(session).then(sendResponse);
         return true;
       } else {
-        console.warn('[Service Worker] GET_VERIFICATION_CODE: 找不到会话, windowId:', senderWindowId);
+        warn('[Service Worker] GET_VERIFICATION_CODE: 找不到会话, windowId:', senderWindowId);
         sendResponse({ success: false, error: '找不到对应会话' });
       }
       break;
 
     case 'GET_ACCOUNT_INFO':
       if (session) {
-        console.log(`[Service Worker] GET_ACCOUNT_INFO: 会话 ${session.id}, email: ${session.email}`);
+        log(`[Service Worker] GET_ACCOUNT_INFO: 会话 ${session.id}, email: ${session.email}`);
         sendResponse({
           email: session.email,
           password: session.password,
@@ -1020,7 +1120,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const existingSessions = Array.from(sessions.values()).map(s =>
           `${s.id}(windowId:${s.windowId})`
         ).join(', ');
-        console.warn('[Service Worker] GET_ACCOUNT_INFO: 找不到会话',
+        warn('[Service Worker] GET_ACCOUNT_INFO: 找不到会话',
           'senderWindowId:', senderWindowId,
           '现有会话:', existingSessions || '无');
         sendResponse({});
@@ -1061,7 +1161,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case 'EXPORT_HISTORY':
-      sendResponse({ history: registrationHistory });
+      // 导出时自动解混淆 clientSecret，方便外部直接使用
+      sendResponse({
+        history: registrationHistory.map(r => {
+          if (r.token?.clientSecret) {
+            return { ...r, token: { ...r.token, clientSecret: deobfuscate(r.token.clientSecret) } };
+          }
+          return r;
+        })
+      });
       break;
 
     case 'VALIDATE_TOKEN':
@@ -1103,8 +1211,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const resp = await fetch(message.url, fetchOptions);
           const body = await resp.text();
           sendResponse({ ok: resp.ok, status: resp.status, body });
-        } catch (err) {
-          sendResponse({ error: err.message });
+        } catch (e) {
+          sendResponse({ error: e.message });
         }
       })();
       return true;
@@ -1117,6 +1225,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         .catch(e => sendResponse({ error: e.message }));
       return true;
 
+    case 'CHECK_XRAY':
+      // 检查 xray-core 是否可用
+      proxyManager.checkXrayAvailable()
+        .then(available => sendResponse({ success: true, available }))
+        .catch(e => sendResponse({ success: false, error: e.message }));
+      return true;
+
+    case 'FETCH_SUBSCRIPTION':
+      // 预览订阅节点列表
+      (async () => {
+        try {
+          const nodes = await fetchSubscription(message.url);
+          subscriptionNodes = nodes;
+          sendResponse({
+            success: true,
+            count: nodes.length,
+            nodes: nodes.map(n => ({
+              protocol: n.protocol,
+              name: n.name || `${n.host}:${n.port}`,
+              host: n.host,
+              port: n.port
+            }))
+          });
+        } catch (e) {
+          sendResponse({ success: false, error: e.message });
+        }
+      })();
+      return true;
+
     default:
       sendResponse({ error: '未知消息类型' });
   }
@@ -1127,7 +1264,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (tab.incognito && changeInfo.status === 'loading') {
     const session = findSessionByWindowId(tab.windowId);
     if (session && session.tabId !== tabId) {
-      console.log(`[Service Worker] 会话 ${session.id} 标签页更新: ${session.tabId} -> ${tabId}`);
+      log(`[Service Worker] 会话 ${session.id} 标签页更新: ${session.tabId} -> ${tabId}`);
       unregisterTabFingerprint(session.tabId);
       session.tabId = tabId;
       registerTabFingerprint(tabId, session.fingerprintConfig);
@@ -1139,7 +1276,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 chrome.windows.onRemoved.addListener((windowId) => {
   const session = findSessionByWindowId(windowId);
   if (session) {
-    console.log(`[Service Worker] 会话 ${session.id} 的窗口已关闭`);
+    log(`[Service Worker] 会话 ${session.id} 的窗口已关闭`);
     unregisterTabFingerprint(session.tabId);
     session.windowId = null;
     session.tabId = null;
@@ -1175,6 +1312,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
     chrome.tabs.get(details.tabId).then(tab => {
       const session = findSessionByWindowId(tab.windowId);
       if (!session?.fingerprintConfig) return;
+      // 注册到快速查找表，确保后续导航走同步路径
+      registerTabFingerprint(details.tabId, session.fingerprintConfig);
       chrome.scripting.executeScript({
         target: { tabId: details.tabId, frameIds: [details.frameId] },
         world: 'MAIN',
@@ -1205,6 +1344,8 @@ async function applyUAHeaderRules(tabId, fpConfig) {
   const ua = fpConfig.navigator.userAgent;
   const chromeVer = ua.match(/Chrome\/([\d.]+)/)?.[1] || '';
   const majorVer = chromeVer.split('.')[0] || '';
+  const platformVersion = fpConfig.navigator.platformVersion || '10.0.19045';
+  const notABrandVer = fpConfig.navigator.notABrandVersion || '99';
 
   // 构建 Accept-Language 头（与 JS 层 navigator.languages 一致）
   const langs = fpConfig.navigator.languages || ['en-US', 'en'];
@@ -1222,11 +1363,16 @@ async function applyUAHeaderRules(tabId, fpConfig) {
       type: 'modifyHeaders',
       requestHeaders: [
         { header: 'User-Agent', operation: 'set', value: ua },
-        { header: 'sec-ch-ua', operation: 'set', value: `"Chromium";v="${majorVer}", "Google Chrome";v="${majorVer}", "Not-A.Brand";v="99"` },
-        { header: 'sec-ch-ua-full-version-list', operation: 'set', value: `"Chromium";v="${chromeVer}", "Google Chrome";v="${chromeVer}", "Not-A.Brand";v="99.0.0.0"` },
+        { header: 'sec-ch-ua', operation: 'set', value: `"Chromium";v="${majorVer}", "Google Chrome";v="${majorVer}", "Not-A.Brand";v="${notABrandVer}"` },
+        { header: 'sec-ch-ua-full-version', operation: 'set', value: `"${chromeVer}"` },
+        { header: 'sec-ch-ua-full-version-list', operation: 'set', value: `"Chromium";v="${chromeVer}", "Google Chrome";v="${chromeVer}", "Not-A.Brand";v="${notABrandVer}.0.0.0"` },
         { header: 'sec-ch-ua-platform', operation: 'set', value: '"Windows"' },
-        { header: 'sec-ch-ua-platform-version', operation: 'set', value: '"10.0.0"' },
+        { header: 'sec-ch-ua-platform-version', operation: 'set', value: `"${platformVersion}"` },
         { header: 'sec-ch-ua-mobile', operation: 'set', value: '?0' },
+        { header: 'sec-ch-ua-arch', operation: 'set', value: '"x86"' },
+        { header: 'sec-ch-ua-bitness', operation: 'set', value: '"64"' },
+        { header: 'sec-ch-ua-model', operation: 'set', value: '""' },
+        { header: 'sec-ch-ua-wow64', operation: 'set', value: '?0' },
         { header: 'Accept-Language', operation: 'set', value: acceptLang },
       ]
     },
@@ -1242,7 +1388,7 @@ async function applyUAHeaderRules(tabId, fpConfig) {
       addRules: [rule]
     });
   } catch (e) {
-    console.warn('[Service Worker] 设置 UA header 规则失败:', e.message);
+    warn('[Service Worker] 设置 UA header 规则失败:', e.message);
   }
 }
 
@@ -1258,21 +1404,21 @@ async function removeUAHeaderRules(tabId) {
 
 // Service Worker 激活时恢复状态
 chrome.runtime.onInstalled.addListener(() => {
-  console.log('[Service Worker] 扩展已安装/更新');
+  log('[Service Worker] 扩展已安装/更新');
 });
 
 // 恢复历史记录
 chrome.storage.local.get(['registrationHistory']).then((stored) => {
   if (stored.registrationHistory) {
     registrationHistory = stored.registrationHistory;
-    console.log('[Service Worker] 恢复历史记录:', registrationHistory.length, '条');
+    log('[Service Worker] 恢复历史记录:', registrationHistory.length, '条');
   }
 });
 
 // ============== 扩展图标点击 → 注入面板 ==============
 
 chrome.action.onClicked.addListener(async (tab) => {
-  console.log('[Service Worker] 扩展图标被点击, tabId:', tab.id, 'url:', tab.url);
+  log('[Service Worker] 扩展图标被点击, tabId:', tab.id, 'url:', tab.url);
 
   // 受限页面：在当前 tab 打开一个空白页再注入
   const restricted = !tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('edge://') ||
@@ -1307,15 +1453,15 @@ chrome.action.onClicked.addListener(async (tab) => {
 
     if (result.result) {
       chrome.tabs.sendMessage(targetTabId, { type: 'TOGGLE_PANEL' }).catch(() => {});
-      console.log('[Service Worker] 面板已存在，切换显示');
+      log('[Service Worker] 面板已存在，切换显示');
     } else {
       await chrome.scripting.executeScript({
         target: { tabId: targetTabId },
         files: ['content/panel.js']
       });
-      console.log('[Service Worker] 面板已注入到 tabId:', targetTabId);
+      log('[Service Worker] 面板已注入到 tabId:', targetTabId);
     }
-  } catch (err) {
-    console.error('[Service Worker] 面板操作失败:', err.message);
+  } catch (e) {
+    err('[Service Worker] 面板操作失败:', e.message);
   }
 });
